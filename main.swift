@@ -68,6 +68,12 @@ struct MenuContent: View {
         }
         .disabled(updater.isRunning)
         .keyboardShortcut("d")
+        Button("Find Missing Dependencies") {
+            updater.runMissing()
+            openWindow(id: "output")
+        }
+        .disabled(updater.isRunning)
+        .keyboardShortcut("m")
         Divider()
         Button(updater.isRunning ? "Show Live Output" : "Show Last Output") {
             openWindow(id: "output")
@@ -279,6 +285,121 @@ class Updater: ObservableObject {
                 }
                 let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
                 UNUserNotificationCenter.current().add(req)
+            }
+        }
+    }
+
+    func runMissing() {
+        guard !isRunning else { return }
+        isRunning = true
+        output = []
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let brewPath = "/opt/homebrew/bin/brew"
+            let env: [String: String] = {
+                var e = ProcessInfo.processInfo.environment
+                e["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                return e
+            }()
+
+            self.setStatus("Finding missing dependencies...")
+            self.log("--- brew missing started ---")
+
+            let task = Process()
+            task.launchPath = brewPath
+            task.arguments = ["missing"]
+            task.environment = env
+
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            task.standardOutput = outPipe
+            task.standardError = errPipe
+
+            outPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+                self.appendOutput(text, isError: false)
+                self.log("stdout: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+            errPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+                self.appendOutput(text, isError: true)
+                self.log("stderr: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+
+            task.launch()
+            task.waitUntilExit()
+
+            outPipe.fileHandleForReading.readabilityHandler = nil
+            errPipe.fileHandleForReading.readabilityHandler = nil
+
+            // Parse missing packages from output: "formula: dep1 dep2 dep3"
+            let missing = self.output
+                .filter { !$0.isError && !$0.text.hasPrefix("$") }
+                .flatMap { $0.text.components(separatedBy: "\n") }
+                .filter { $0.contains(":") }
+
+            self.log("--- brew missing finished ---\n")
+
+            DispatchQueue.main.async {
+                self.isRunning = false
+                self.status = "Idle"
+
+                let content = UNMutableNotificationContent()
+                content.title = "Buum — Missing Dependencies"
+                content.sound = .default
+
+                if missing.isEmpty {
+                    content.body = "✅ No missing dependencies found!"
+                } else {
+                    // Offer to install them
+                    content.body = "⚠️ \(missing.count) formula(e) have missing deps. Check output window."
+                    content.categoryIdentifier = "MISSING_DEPS"
+                }
+
+                let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+                UNUserNotificationCenter.current().add(req)
+
+                // If missing deps found, offer to reinstall them
+                if !missing.isEmpty {
+                    self.offerReinstall(missing: missing, brewPath: brewPath, env: env)
+                }
+            }
+        }
+    }
+
+    private func offerReinstall(missing: [String], brewPath: String, env: [String: String]) {
+        let alert = NSAlert()
+        alert.messageText = "Missing Dependencies Found"
+        alert.informativeText = "\(missing.count) formula(e) have missing dependencies.\n\nWould you like to reinstall them now?"
+        alert.addButton(withTitle: "Reinstall")
+        alert.addButton(withTitle: "Ignore")
+        alert.alertStyle = .warning
+
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+
+        if response == .alertFirstButtonReturn {
+            // Extract formula names (before the colon on each line)
+            let formulae = missing.compactMap { line -> String? in
+                let parts = line.components(separatedBy: ":")
+                return parts.first?.trimmingCharacters(in: .whitespaces)
+            }
+            guard !formulae.isEmpty else { return }
+
+            isRunning = true
+            setStatus("Reinstalling missing deps...")
+            output = []
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                var failed = false
+                self.shell(brewPath, ["reinstall"] + formulae, env: env, &failed)
+                DispatchQueue.main.async {
+                    self.isRunning = false
+                    self.status = "Idle"
+                    self.notify(success: !failed)
+                }
             }
         }
     }
