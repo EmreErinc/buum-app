@@ -92,15 +92,24 @@ class Updater: ObservableObject {
     @Published var waitingForInput = false
     @Published var inputPrompt = ""
 
-    // Continuations for password input from UI
     private var stdinHandle: FileHandle?
-    private let inputSemaphore = DispatchSemaphore(value: 0)
+    private let inputSemaphore = DispatchSemaphore(value: 0)   // unblocks readabilityHandler → writes to stdin
+    private let commandSemaphore = DispatchSemaphore(value: 0) // unblocks run() → resumes next command
     private var pendingInput: String = ""
+    private var promptActive = false  // true while waiting for user input
 
     func submitInput(_ value: String) {
         pendingInput = value
-        waitingForInput = false
-        inputSemaphore.signal()
+        promptActive = false
+        DispatchQueue.main.async { self.waitingForInput = false }
+        inputSemaphore.signal()    // let readabilityHandler write to stdin
+        commandSemaphore.signal()  // let run() continue to next command
+    }
+
+    // Called between every shell() in run() — blocks if a prompt is pending
+    func waitIfPromptActive() {
+        guard promptActive else { return }
+        commandSemaphore.wait()
     }
 
     struct OutputLine: Identifiable {
@@ -163,28 +172,35 @@ class Updater: ObservableObject {
             if !FileManager.default.fileExists(atPath: brewPath) {
                 self.setStatus("Installing Homebrew...")
                 self.shell("/bin/bash", ["-c", #"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#], env: env, &failed)
+                self.waitIfPromptActive()
             }
 
             // Install mas if missing
             if !FileManager.default.fileExists(atPath: masPath) {
                 self.setStatus("Installing mas...")
                 self.shell(brewPath, ["install", "mas"], env: env, &failed)
+                self.waitIfPromptActive()
             }
 
             self.setStatus("Updating Homebrew...")
             self.shell(brewPath, ["update"], env: env, &failed)
+            self.waitIfPromptActive()
 
             self.setStatus("Upgrading packages...")
             self.shell(brewPath, ["upgrade"], env: env, &failed)
+            self.waitIfPromptActive()
 
             self.setStatus("Checking App Store updates...")
             self.shell(masPath, ["outdated"], env: env, &failed)
+            self.waitIfPromptActive()
 
             self.setStatus("Upgrading App Store apps...")
             self.shell(masPath, ["upgrade"], env: env, &failed)
+            self.waitIfPromptActive()
 
             self.setStatus("Cleaning up Homebrew cache...")
             self.shell(brewPath, ["cleanup", "--prune=all"], env: env, &failed)
+            self.waitIfPromptActive()
 
             self.setStatus("Checking for broken casks...")
             let brokenCasks = self.findBrokenCasks(brewPath: brewPath, env: env)
@@ -371,13 +387,13 @@ class Updater: ObservableObject {
     }
 
     private func promptForInput(_ prompt: String) {
+        promptActive = true
         DispatchQueue.main.async {
             self.inputPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
             self.waitingForInput = true
         }
-        // Block the background thread until user submits
+        // Block readabilityHandler thread until user submits password
         inputSemaphore.wait()
-        // Write password + newline to stdin
         if let data = (pendingInput + "\n").data(using: .utf8) {
             stdinHandle?.write(data)
         }
