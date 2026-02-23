@@ -195,7 +195,7 @@ class Updater: ObservableObject {
             self.waitIfPromptActive()
 
             self.setStatus("Upgrading App Store apps...")
-            self.shell(masPath, ["upgrade"], env: env, &failed)
+            self.shellWithAuth("mas upgrade", label: "mas upgrade", env: env, failed: &failed)
             self.waitIfPromptActive()
 
             self.setStatus("Cleaning up Homebrew cache...")
@@ -402,6 +402,52 @@ class Updater: ObservableObject {
 
     func setStatus(_ message: String) {
         DispatchQueue.main.async { self.status = message }
+    }
+
+    // Runs a shell command via osascript so macOS shows its native auth dialog if needed
+    func shellWithAuth(_ command: String, label: String, env: [String: String], failed: inout Bool) {
+        appendOutput("$ \(label)", isError: false)
+        log("$ \(command) [via osascript]")
+
+        // Build PATH prefix so mas is found inside osascript environment
+        let path = env["PATH"] ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        let script = "do shell script \"export PATH=\\\"\(path)\\\"; \(command)\" with administrator privileges"
+
+        let task = Process()
+        task.launchPath = "/usr/bin/osascript"
+        task.arguments = ["-e", script]
+
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        task.standardOutput = outPipe
+        task.standardError = errPipe
+
+        outPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            self.appendOutput(text, isError: false)
+            self.log("stdout: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            // "User canceled" means they dismissed the dialog — not a real error
+            let cancelled = text.contains("User canceled") || text.contains("-128")
+            self.appendOutput(text, isError: !cancelled)
+            self.log("stderr: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+
+        task.launch()
+        task.waitUntilExit()
+
+        outPipe.fileHandleForReading.readabilityHandler = nil
+        errPipe.fileHandleForReading.readabilityHandler = nil
+
+        let exitCode = task.terminationStatus
+        log("exit: \(exitCode)")
+        // Exit 1 with "User canceled" (-128) is not a real failure
+        if exitCode != 0 { failed = true }
     }
 
     func notify(success: Bool, brokenCasks: [String] = []) {
