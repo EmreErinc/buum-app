@@ -89,18 +89,32 @@ class Updater: ObservableObject {
     @Published var status = "Idle"
     @Published var hasIssues = false
     @Published var output: [OutputLine] = []
+    @Published var waitingForInput = false
+    @Published var inputPrompt = ""
+
+    // Continuations for password input from UI
+    private var stdinHandle: FileHandle?
+    private let inputSemaphore = DispatchSemaphore(value: 0)
+    private var pendingInput: String = ""
+
+    func submitInput(_ value: String) {
+        pendingInput = value
+        waitingForInput = false
+        inputSemaphore.signal()
+    }
 
     struct OutputLine: Identifiable {
         let id = UUID()
         let text: String
         let isError: Bool
+        let isPrompt: Bool
     }
 
-    func appendOutput(_ text: String, isError: Bool = false) {
+    func appendOutput(_ text: String, isError: Bool = false, isPrompt: Bool = false) {
         let lines = text.components(separatedBy: "\n").filter { !$0.isEmpty }
         DispatchQueue.main.async {
             for line in lines {
-                self.output.append(OutputLine(text: line, isError: isError))
+                self.output.append(OutputLine(text: line, isError: isError, isPrompt: isPrompt))
             }
         }
     }
@@ -311,29 +325,36 @@ class Updater: ObservableObject {
 
         let outPipe = Pipe()
         let errPipe = Pipe()
+        let inPipe  = Pipe()
         task.standardOutput = outPipe
-        task.standardError = errPipe
+        task.standardError  = errPipe
+        task.standardInput  = inPipe
+        stdinHandle = inPipe.fileHandleForWriting
 
         let cmd = ([path.components(separatedBy: "/").last ?? path] + args).joined(separator: " ")
         appendOutput("$ \(cmd)", isError: false)
         log("$ \(([path] + args).joined(separator: " "))")
 
+        let passwordPatterns = ["password", "Password", "sudo:"]
+
         // Stream stdout live
         outPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            if let text = String(data: data, encoding: .utf8), !text.isEmpty {
-                self.appendOutput(text, isError: false)
-                self.log("stdout: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
-            }
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            self.log("stdout: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+            let isPrompt = passwordPatterns.contains(where: { text.contains($0) })
+            self.appendOutput(text, isError: false, isPrompt: isPrompt)
+            if isPrompt { self.promptForInput(text) }
         }
 
-        // Stream stderr live
+        // Stream stderr live — detect password prompts
         errPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            if let text = String(data: data, encoding: .utf8), !text.isEmpty {
-                self.appendOutput(text, isError: true)
-                self.log("stderr: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
-            }
+            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            self.log("stderr: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+            let isPrompt = passwordPatterns.contains(where: { text.contains($0) })
+            self.appendOutput(text, isError: !isPrompt, isPrompt: isPrompt)
+            if isPrompt { self.promptForInput(text) }
         }
 
         task.launch()
@@ -341,11 +362,26 @@ class Updater: ObservableObject {
 
         outPipe.fileHandleForReading.readabilityHandler = nil
         errPipe.fileHandleForReading.readabilityHandler = nil
+        stdinHandle = nil
 
         let exitCode = task.terminationStatus
         log("exit: \(exitCode)")
         if exitCode != 0 { failed = true }
         return exitCode
+    }
+
+    private func promptForInput(_ prompt: String) {
+        DispatchQueue.main.async {
+            self.inputPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.waitingForInput = true
+        }
+        // Block the background thread until user submits
+        inputSemaphore.wait()
+        // Write password + newline to stdin
+        if let data = (pendingInput + "\n").data(using: .utf8) {
+            stdinHandle?.write(data)
+        }
+        pendingInput = ""
     }
 
     func setStatus(_ message: String) {
@@ -385,6 +421,8 @@ class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
 struct TerminalView: View {
     @ObservedObject var updater: Updater
     @State private var autoScroll = true
+    @State private var password = ""
+    @FocusState private var passwordFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -450,6 +488,38 @@ struct TerminalView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .background(.black.opacity(0.85))
+
+            // Password prompt bar — shown when a command needs sudo
+            if updater.waitingForInput {
+                Divider().background(.yellow.opacity(0.4))
+                HStack(spacing: 8) {
+                    Image(systemName: "lock.fill")
+                        .foregroundStyle(.yellow)
+                        .font(.system(size: 12))
+                    Text(updater.inputPrompt.isEmpty ? "Password required:" : updater.inputPrompt)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.yellow)
+                    SecureField("Enter password…", text: $password)
+                        .font(.system(size: 12, design: .monospaced))
+                        .textFieldStyle(.plain)
+                        .foregroundStyle(.white)
+                        .focused($passwordFocused)
+                        .onSubmit {
+                            updater.submitInput(password)
+                            password = ""
+                        }
+                    Button("Submit") {
+                        updater.submitInput(password)
+                        password = ""
+                    }
+                    .font(.system(size: 11))
+                    .keyboardShortcut(.return)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.yellow.opacity(0.08))
+                .onAppear { passwordFocused = true }
+            }
         }
         .background(Color.black)
     }
