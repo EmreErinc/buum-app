@@ -28,33 +28,7 @@ struct BuumApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            Text(updater.isRunning ? updater.status : "Buum")
-                .font(.headline)
-                .padding(.bottom, 4)
-            Divider()
-            Button("Run Updates (buum)") {
-                updater.run()
-            }
-            .disabled(updater.isRunning)
-            .keyboardShortcut("u")
-            Button("Run Brew Doctor") {
-                updater.runDoctor()
-            }
-            .disabled(updater.isRunning)
-            .keyboardShortcut("d")
-            Divider()
-            Button(updater.isRunning ? "Show Live Output" : "Show Last Output") {
-                updater.showWindow = true
-            }
-            .disabled(updater.output.isEmpty)
-            Button("Show Log") {
-                NSWorkspace.shared.open(updater.logURL)
-            }
-            Divider()
-            Button("Quit") {
-                NSApplication.shared.terminate(nil)
-            }
-            .keyboardShortcut("q")
+            MenuContent(updater: updater)
         } label: {
             if updater.isRunning {
                 Image(systemName: "arrow.triangle.2.circlepath")
@@ -70,11 +44,43 @@ struct BuumApp: App {
                 .frame(minWidth: 680, minHeight: 420)
         }
         .defaultSize(width: 680, height: 420)
-        .onChange(of: updater.showWindow) { show in
-            if show {
-                NSApp.sendAction(Selector(("showWindow:")), to: nil, from: nil)
-            }
+    }
+}
+
+struct MenuContent: View {
+    @ObservedObject var updater: Updater
+    @Environment(\.openWindow) var openWindow
+
+    var body: some View {
+        Text(updater.isRunning ? updater.status : "Buum")
+            .font(.headline)
+            .padding(.bottom, 4)
+        Divider()
+        Button("Run Updates (buum)") {
+            updater.run()
+            openWindow(id: "output")
         }
+        .disabled(updater.isRunning)
+        .keyboardShortcut("u")
+        Button("Run Brew Doctor") {
+            updater.runDoctor()
+            openWindow(id: "output")
+        }
+        .disabled(updater.isRunning)
+        .keyboardShortcut("d")
+        Divider()
+        Button(updater.isRunning ? "Show Live Output" : "Show Last Output") {
+            openWindow(id: "output")
+        }
+        .disabled(updater.output.isEmpty)
+        Button("Show Log") {
+            NSWorkspace.shared.open(updater.logURL)
+        }
+        Divider()
+        Button("Quit") {
+            NSApplication.shared.terminate(nil)
+        }
+        .keyboardShortcut("q")
     }
 }
 
@@ -83,7 +89,6 @@ class Updater: ObservableObject {
     @Published var status = "Idle"
     @Published var hasIssues = false
     @Published var output: [OutputLine] = []
-    @Published var showWindow = false
 
     struct OutputLine: Identifiable {
         let id = UUID()
@@ -127,7 +132,6 @@ class Updater: ObservableObject {
         guard !isRunning else { return }
         isRunning = true
         output = []
-        showWindow = true
 
         DispatchQueue.global(qos: .userInitiated).async {
             let brewPath = "/opt/homebrew/bin/brew"
@@ -192,7 +196,6 @@ class Updater: ObservableObject {
         isRunning = true
         hasIssues = false
         output = []
-        showWindow = true
 
         DispatchQueue.global(qos: .userInitiated).async {
             let brewPath = "/opt/homebrew/bin/brew"
