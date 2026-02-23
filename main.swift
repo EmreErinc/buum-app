@@ -104,6 +104,39 @@ struct MenuContent: View {
         }
         .disabled(updater.isRunning)
         .keyboardShortcut("m")
+
+        // System updates
+        Divider()
+        Button("macOS Software Update") {
+            updater.runSoftwareUpdate()
+            openWindow(id: "output")
+        }
+        .disabled(updater.isRunning)
+        .keyboardShortcut("s", modifiers: [.command, .shift])
+        Button("Update npm & pip Globals") {
+            updater.runDevUpdate()
+            openWindow(id: "output")
+        }
+        .disabled(updater.isRunning)
+
+        // Brew Services submenu
+        Divider()
+        Menu("🔧 Brew Services") {
+            Button(updater.isLoadingServices ? "Refreshing…" : "Refresh") {
+                updater.fetchServices()
+            }
+            .disabled(updater.isLoadingServices)
+            if !updater.services.isEmpty {
+                Divider()
+                ForEach(updater.services) { svc in
+                    Menu("\(svc.statusIcon) \(svc.name)") {
+                        Button("Start")   { updater.serviceAction("start",   service: svc.name); openWindow(id: "output") }
+                        Button("Stop")    { updater.serviceAction("stop",    service: svc.name); openWindow(id: "output") }
+                        Button("Restart") { updater.serviceAction("restart", service: svc.name); openWindow(id: "output") }
+                    }
+                }
+            }
+        }
         Divider()
         Button(updater.isRunning ? "Show Live Output" : "Show Last Output") {
             openWindow(id: "output")
@@ -176,6 +209,21 @@ struct OutdatedPackage: Identifiable {
     let latest: String
 }
 
+struct BrewService: Identifiable {
+    let id = UUID()
+    let name: String
+    let status: String  // "started", "stopped", "error", "none"
+
+    var statusIcon: String {
+        switch status {
+        case "started": return "🟢"
+        case "error":   return "🔴"
+        case "stopped": return "⚫"
+        default:        return "⚪"
+        }
+    }
+}
+
 class Updater: ObservableObject {
     @Published var isRunning = false
     @Published var status = "Idle"
@@ -185,8 +233,10 @@ class Updater: ObservableObject {
     @Published var inputPrompt = ""
     @Published var outdatedPackages: [OutdatedPackage] = []
     @Published var isCheckingOutdated = false
+    @Published var services: [BrewService] = []
+    @Published var isLoadingServices = false
 
-    init() { fetchOutdated() }
+    init() { fetchOutdated(); fetchServices() }
 
     private var stdinHandle: FileHandle?
     private let inputSemaphore = DispatchSemaphore(value: 0)   // unblocks readabilityHandler → writes to stdin
@@ -235,6 +285,131 @@ class Updater: ObservableObject {
         }
     }
 
+
+    func fetchServices() {
+        guard !isLoadingServices else { return }
+        isLoadingServices = true
+        DispatchQueue.global(qos: .utility).async {
+            let brewPath = "/opt/homebrew/bin/brew"
+            let env: [String: String] = {
+                var e = ProcessInfo.processInfo.environment
+                e["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                return e
+            }()
+            guard FileManager.default.fileExists(atPath: brewPath) else {
+                DispatchQueue.main.async { self.isLoadingServices = false }
+                return
+            }
+            let task = Process()
+            task.launchPath = brewPath
+            task.arguments = ["services", "list"]
+            task.environment = env
+            let pipe = Pipe()
+            task.standardOutput = pipe
+            task.standardError = Pipe()
+            task.launch()
+            task.waitUntilExit()
+
+            let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let svcs: [BrewService] = out.components(separatedBy: "\n")
+                .dropFirst() // skip header row
+                .compactMap { line in
+                    let parts = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+                    guard parts.count >= 2 else { return nil }
+                    return BrewService(name: parts[0], status: parts[1])
+                }
+                .filter { $0.status != "none" }
+            DispatchQueue.main.async {
+                self.services = svcs
+                self.isLoadingServices = false
+                // Warn in menu bar if any service is in error state
+                if svcs.contains(where: { $0.status == "error" }) {
+                    self.hasIssues = true
+                }
+            }
+        }
+    }
+
+    func serviceAction(_ action: String, service: String) {
+        guard !isRunning else { return }
+        isRunning = true
+        output = []
+        DispatchQueue.global(qos: .userInitiated).async {
+            let brewPath = "/opt/homebrew/bin/brew"
+            let env: [String: String] = {
+                var e = ProcessInfo.processInfo.environment
+                e["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                return e
+            }()
+            var failed = false
+            self.setStatus("\(action.capitalized)ing \(service)…")
+            self.log("--- brew services \(action) \(service) ---")
+            self.shell(brewPath, ["services", action, service], env: env, &failed)
+            self.log("--- done ---\n")
+            DispatchQueue.main.async {
+                self.isRunning = false
+                self.status = "Idle"
+                self.fetchServices()
+            }
+        }
+    }
+
+    func runSoftwareUpdate() {
+        guard !isRunning else { return }
+        isRunning = true
+        output = []
+        DispatchQueue.global(qos: .userInitiated).async {
+            let env: [String: String] = {
+                var e = ProcessInfo.processInfo.environment
+                e["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                return e
+            }()
+            var failed = false
+            self.setStatus("Running macOS Software Update…")
+            self.log("--- softwareupdate started ---")
+            self.shell("/usr/sbin/softwareupdate", ["--install", "--all"], env: env, &failed)
+            self.log("--- softwareupdate finished ---\n")
+            DispatchQueue.main.async {
+                self.isRunning = false
+                self.status = "Idle"
+                self.notify(success: !failed)
+            }
+        }
+    }
+
+    func runDevUpdate() {
+        guard !isRunning else { return }
+        isRunning = true
+        output = []
+        DispatchQueue.global(qos: .userInitiated).async {
+            let env: [String: String] = {
+                var e = ProcessInfo.processInfo.environment
+                e["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                return e
+            }()
+            var failed = false
+            self.log("--- dev tools update started ---")
+
+            // npm
+            self.setStatus("Updating npm globals…")
+            let npmCode = self.shell("/bin/bash", ["-c", "which npm && npm update -g"], env: env, &failed)
+            if npmCode == 1 { self.appendOutput("npm not found, skipping.", isError: false) }
+            self.waitIfPromptActive()
+
+            // pip3
+            self.setStatus("Updating pip3…")
+            let pipCode = self.shell("/bin/bash", ["-c", "which pip3 && pip3 install --upgrade pip"], env: env, &failed)
+            if pipCode == 1 { self.appendOutput("pip3 not found, skipping.", isError: false) }
+            self.waitIfPromptActive()
+
+            self.log("--- dev tools update finished ---\n")
+            DispatchQueue.main.async {
+                self.isRunning = false
+                self.status = "Idle"
+                self.notify(success: !failed)
+            }
+        }
+    }
 
     func submitInput(_ value: String) {
         pendingInput = value
