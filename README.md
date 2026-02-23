@@ -58,7 +58,7 @@ swiftc generate_icon.swift -sdk $(xcrun --show-sdk-path) \
 iconutil -c icns Buum.iconset -o AppIcon.icns
 
 # Build app
-swiftc main.swift -sdk $(xcrun --show-sdk-path) \
+swiftc Sources/*.swift -sdk $(xcrun --show-sdk-path) \
   -target arm64-apple-macosx13.0 \
   -framework SwiftUI -framework AppKit -framework UserNotifications \
   -parse-as-library -o Buum
