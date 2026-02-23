@@ -1,0 +1,17 @@
+# Compiled binaries
+Buum
+generate_icon
+
+# Build artifacts — keep Buum.app/ out except Info.plist
+Buum.app/Contents/MacOS/
+Buum.app/Contents/Resources/
+*.zip
+*.icns
+
+# macOS
+.DS_Store
+
+# Xcode
+*.xcodeproj
+*.xcworkspace
+DerivedData/
