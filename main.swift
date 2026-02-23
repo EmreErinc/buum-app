@@ -45,9 +45,11 @@ struct BuumApp: App {
         }
         .defaultSize(width: 680, height: 420)
 
-        Settings {
+        Window("Buum Preferences", id: "preferences") {
             PrefsView()
+                .frame(minWidth: 480, minHeight: 400)
         }
+        .defaultSize(width: 480, height: 400)
     }
 }
 
@@ -112,7 +114,7 @@ struct MenuContent: View {
         }
         Divider()
         Button("Preferences…") {
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+            openWindow(id: "preferences")
             NSApp.activate(ignoringOtherApps: true)
         }
         .keyboardShortcut(",")
