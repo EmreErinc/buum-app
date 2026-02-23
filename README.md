@@ -42,6 +42,9 @@ brew install --cask buum
 
 Download `Buum.zip` from [Releases](https://github.com/emreerinc/buum/releases), unzip and move to `/Applications`.
 
+> **Security warning on first launch?** macOS may block unnotarized apps.
+> Go to **System Settings → Privacy & Security** → scroll down → **"Open Anyway"**.
+
 ## Build from source
 
 ```bash
