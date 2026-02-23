@@ -56,6 +56,30 @@ struct MenuContent: View {
             .font(.headline)
             .padding(.bottom, 4)
         Divider()
+
+        // Outdated packages submenu
+        if updater.isCheckingOutdated {
+            Text("Checking for outdated packages…")
+                .foregroundStyle(.secondary)
+                .font(.system(size: 12))
+        } else if !updater.outdatedPackages.isEmpty {
+            Menu("📦 \(updater.outdatedPackages.count) Outdated Package\(updater.outdatedPackages.count == 1 ? "" : "s")") {
+                ForEach(updater.outdatedPackages) { pkg in
+                    Text("\(pkg.name)  \(pkg.current) → \(pkg.latest)")
+                        .font(.system(size: 12, design: .monospaced))
+                }
+            }
+        } else {
+            Text("✅ All packages up to date")
+                .foregroundStyle(.secondary)
+                .font(.system(size: 12))
+        }
+        Button(updater.isCheckingOutdated ? "Checking…" : "Refresh Outdated List") {
+            updater.fetchOutdated()
+        }
+        .disabled(updater.isRunning || updater.isCheckingOutdated)
+        .keyboardShortcut("c")
+        Divider()
         Button("Run Updates (buum)") {
             updater.run()
             openWindow(id: "output")
@@ -90,6 +114,13 @@ struct MenuContent: View {
     }
 }
 
+struct OutdatedPackage: Identifiable {
+    let id = UUID()
+    let name: String
+    let current: String
+    let latest: String
+}
+
 class Updater: ObservableObject {
     @Published var isRunning = false
     @Published var status = "Idle"
@@ -97,12 +128,58 @@ class Updater: ObservableObject {
     @Published var output: [OutputLine] = []
     @Published var waitingForInput = false
     @Published var inputPrompt = ""
+    @Published var outdatedPackages: [OutdatedPackage] = []
+    @Published var isCheckingOutdated = false
+
+    init() { fetchOutdated() }
 
     private var stdinHandle: FileHandle?
     private let inputSemaphore = DispatchSemaphore(value: 0)   // unblocks readabilityHandler → writes to stdin
     private let commandSemaphore = DispatchSemaphore(value: 0) // unblocks run() → resumes next command
     private var pendingInput: String = ""
     private var promptActive = false  // true while waiting for user input
+
+    func fetchOutdated() {
+        guard !isRunning && !isCheckingOutdated else { return }
+        isCheckingOutdated = true
+        DispatchQueue.global(qos: .utility).async {
+            let brewPath = "/opt/homebrew/bin/brew"
+            let env: [String: String] = {
+                var e = ProcessInfo.processInfo.environment
+                e["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                return e
+            }()
+            guard FileManager.default.fileExists(atPath: brewPath) else {
+                DispatchQueue.main.async { self.isCheckingOutdated = false }
+                return
+            }
+            let task = Process()
+            task.launchPath = brewPath
+            task.arguments = ["outdated", "--verbose"]
+            task.environment = env
+            let pipe = Pipe()
+            task.standardOutput = pipe
+            task.standardError = Pipe()
+            task.launch()
+            task.waitUntilExit()
+
+            let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            // Each line: "formula (current) < latest"
+            let packages: [OutdatedPackage] = out.components(separatedBy: "\n").compactMap { line in
+                let parts = line.trimmingCharacters(in: .whitespaces).components(separatedBy: " ")
+                guard parts.count >= 4 else { return nil }
+                let name = parts[0]
+                let current = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "()"))
+                let latest = parts.last ?? ""
+                return OutdatedPackage(name: name, current: current, latest: latest)
+            }
+            DispatchQueue.main.async {
+                self.outdatedPackages = packages
+                self.isCheckingOutdated = false
+            }
+        }
+    }
+
 
     func submitInput(_ value: String) {
         pendingInput = value
@@ -223,6 +300,7 @@ class Updater: ObservableObject {
                 self.isRunning = false
                 self.status = "Idle"
                 self.notify(success: !failed, brokenCasks: brokenCasks)
+                self.fetchOutdated()
             }
         }
     }
