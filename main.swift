@@ -342,7 +342,7 @@ class Updater: ObservableObject {
                 self.waitIfPromptActive()
 
                 self.setStatus("Upgrading App Store apps...")
-                self.shellWithAuth("mas upgrade", label: "mas upgrade", env: env, failed: &failed)
+                self.shell(masPath, ["upgrade"], env: env, &failed)
                 self.waitIfPromptActive()
             }
 
