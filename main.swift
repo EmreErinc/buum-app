@@ -43,6 +43,10 @@ struct BuumApp: App {
             .disabled(updater.isRunning)
             .keyboardShortcut("d")
             Divider()
+            Button(updater.isRunning ? "Show Live Output" : "Show Last Output") {
+                updater.showWindow = true
+            }
+            .disabled(updater.output.isEmpty)
             Button("Show Log") {
                 NSWorkspace.shared.open(updater.logURL)
             }
@@ -60,6 +64,17 @@ struct BuumApp: App {
                 Image(systemName: "shippingbox.fill")
             }
         }
+
+        Window("Buum Output", id: "output") {
+            TerminalView(updater: updater)
+                .frame(minWidth: 680, minHeight: 420)
+        }
+        .defaultSize(width: 680, height: 420)
+        .onChange(of: updater.showWindow) { show in
+            if show {
+                NSApp.sendAction(Selector(("showWindow:")), to: nil, from: nil)
+            }
+        }
     }
 }
 
@@ -67,6 +82,23 @@ class Updater: ObservableObject {
     @Published var isRunning = false
     @Published var status = "Idle"
     @Published var hasIssues = false
+    @Published var output: [OutputLine] = []
+    @Published var showWindow = false
+
+    struct OutputLine: Identifiable {
+        let id = UUID()
+        let text: String
+        let isError: Bool
+    }
+
+    func appendOutput(_ text: String, isError: Bool = false) {
+        let lines = text.components(separatedBy: "\n").filter { !$0.isEmpty }
+        DispatchQueue.main.async {
+            for line in lines {
+                self.output.append(OutputLine(text: line, isError: isError))
+            }
+        }
+    }
 
     let logURL: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser
@@ -94,6 +126,8 @@ class Updater: ObservableObject {
     func run() {
         guard !isRunning else { return }
         isRunning = true
+        output = []
+        showWindow = true
 
         DispatchQueue.global(qos: .userInitiated).async {
             let brewPath = "/opt/homebrew/bin/brew"
@@ -157,6 +191,8 @@ class Updater: ObservableObject {
         guard !isRunning else { return }
         isRunning = true
         hasIssues = false
+        output = []
+        showWindow = true
 
         DispatchQueue.global(qos: .userInitiated).async {
             let brewPath = "/opt/homebrew/bin/brew"
@@ -275,23 +311,38 @@ class Updater: ObservableObject {
         task.standardOutput = outPipe
         task.standardError = errPipe
 
+        let cmd = ([path.components(separatedBy: "/").last ?? path] + args).joined(separator: " ")
+        appendOutput("$ \(cmd)", isError: false)
+        log("$ \(([path] + args).joined(separator: " "))")
+
+        // Stream stdout live
+        outPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if let text = String(data: data, encoding: .utf8), !text.isEmpty {
+                self.appendOutput(text, isError: false)
+                self.log("stdout: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+        }
+
+        // Stream stderr live
+        errPipe.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if let text = String(data: data, encoding: .utf8), !text.isEmpty {
+                self.appendOutput(text, isError: true)
+                self.log("stderr: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+        }
+
         task.launch()
         task.waitUntilExit()
 
-        let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let cmd = ([path] + args).joined(separator: " ")
+        outPipe.fileHandleForReading.readabilityHandler = nil
+        errPipe.fileHandleForReading.readabilityHandler = nil
 
-        log("$ \(cmd) [exit: \(task.terminationStatus)]")
-        if !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            log("stdout: \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
-        }
-        if !err.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            log("stderr: \(err.trimmingCharacters(in: .whitespacesAndNewlines))")
-        }
-
-        if task.terminationStatus != 0 { failed = true }
-        return task.terminationStatus
+        let exitCode = task.terminationStatus
+        log("exit: \(exitCode)")
+        if exitCode != 0 { failed = true }
+        return exitCode
     }
 
     func setStatus(_ message: String) {
@@ -325,5 +376,78 @@ class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
                                 didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         completionHandler()
+    }
+}
+
+struct TerminalView: View {
+    @ObservedObject var updater: Updater
+    @State private var autoScroll = true
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Title bar
+            HStack {
+                Circle().fill(.red).frame(width: 12, height: 12)
+                Circle().fill(.yellow).frame(width: 12, height: 12)
+                Circle().fill(.green).frame(width: 12, height: 12)
+                Spacer()
+                Text(updater.isRunning ? updater.status : "Done")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Toggle("Auto-scroll", isOn: $autoScroll)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.black.opacity(0.85))
+
+            Divider().background(.gray.opacity(0.3))
+
+            // Output lines
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(updater.output) { line in
+                            Text(line.text)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(line.isError ? Color.red.opacity(0.85) : Color.green.opacity(0.9))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        Color.clear.frame(height: 1).id("bottom")
+                    }
+                    .padding(12)
+                }
+                .onChange(of: updater.output.count) { _ in
+                    if autoScroll {
+                        withAnimation { proxy.scrollTo("bottom") }
+                    }
+                }
+            }
+            .background(Color.black)
+
+            // Bottom bar
+            HStack {
+                Text("\(updater.output.count) lines")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if updater.isRunning {
+                    ProgressView().scaleEffect(0.6)
+                }
+                Button("Clear") { updater.output = [] }
+                    .font(.system(size: 11))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .disabled(updater.isRunning)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(.black.opacity(0.85))
+        }
+        .background(Color.black)
     }
 }
