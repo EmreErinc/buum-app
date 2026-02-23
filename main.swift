@@ -37,6 +37,11 @@ struct BuumApp: App {
             }
             .disabled(updater.isRunning)
             .keyboardShortcut("u")
+            Button("Run Brew Doctor") {
+                updater.runDoctor()
+            }
+            .disabled(updater.isRunning)
+            .keyboardShortcut("d")
             Divider()
             Button("Show Log") {
                 NSWorkspace.shared.open(updater.logURL)
@@ -49,6 +54,8 @@ struct BuumApp: App {
         } label: {
             if updater.isRunning {
                 Image(systemName: "arrow.triangle.2.circlepath")
+            } else if updater.hasIssues {
+                Image(systemName: "exclamationmark.triangle.fill")
             } else {
                 Image(systemName: "shippingbox.fill")
             }
@@ -59,6 +66,7 @@ struct BuumApp: App {
 class Updater: ObservableObject {
     @Published var isRunning = false
     @Published var status = "Idle"
+    @Published var hasIssues = false
 
     let logURL: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser
@@ -141,6 +149,67 @@ class Updater: ObservableObject {
                 self.isRunning = false
                 self.status = "Idle"
                 self.notify(success: !failed, brokenCasks: brokenCasks)
+            }
+        }
+    }
+
+    func runDoctor() {
+        guard !isRunning else { return }
+        isRunning = true
+        hasIssues = false
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let brewPath = "/opt/homebrew/bin/brew"
+            let env: [String: String] = {
+                var e = ProcessInfo.processInfo.environment
+                e["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                return e
+            }()
+
+            self.setStatus("Running brew doctor...")
+            self.log("--- brew doctor started ---")
+
+            let task = Process()
+            task.launchPath = brewPath
+            task.arguments = ["doctor"]
+            task.environment = env
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            task.standardOutput = outPipe
+            task.standardError = errPipe
+            task.launch()
+            task.waitUntilExit()
+
+            let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let healthy = task.terminationStatus == 0
+
+            if !out.isEmpty { self.log("stdout: \(out.trimmingCharacters(in: .whitespacesAndNewlines))") }
+            if !err.isEmpty { self.log("stderr: \(err.trimmingCharacters(in: .whitespacesAndNewlines))") }
+            self.log("--- brew doctor finished (healthy: \(healthy)) ---\n")
+
+            // Parse issues from output for a summary
+            let issues = (out + err)
+                .components(separatedBy: "\n")
+                .filter { $0.hasPrefix("Warning:") || $0.hasPrefix("Error:") }
+
+            DispatchQueue.main.async {
+                self.isRunning = false
+                self.status = "Idle"
+                self.hasIssues = !healthy
+
+                let content = UNMutableNotificationContent()
+                content.title = "Buum — Brew Doctor"
+                content.sound = .default
+                if healthy {
+                    content.body = "✅ Your system is ready to brew!"
+                } else if issues.isEmpty {
+                    content.body = "⚠️ Issues found. Open Show Log for details."
+                } else {
+                    content.body = "⚠️ \(issues.count) issue(s): \(issues.prefix(2).joined(separator: " | "))"
+                }
+                let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+                UNUserNotificationCenter.current().add(req)
             }
         }
     }
