@@ -44,6 +44,10 @@ struct BuumApp: App {
                 .frame(minWidth: 680, minHeight: 420)
         }
         .defaultSize(width: 680, height: 420)
+
+        Settings {
+            PrefsView()
+        }
     }
 }
 
@@ -107,10 +111,59 @@ struct MenuContent: View {
             NSWorkspace.shared.open(updater.logURL)
         }
         Divider()
+        Button("Preferences…") {
+            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        .keyboardShortcut(",")
         Button("Quit") {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")
+    }
+}
+
+// MARK: - Preferences
+
+class Prefs: ObservableObject {
+    static let shared = Prefs()
+    @AppStorage("runMas")             var runMas             = true
+    @AppStorage("runCleanup")         var runCleanup         = true
+    @AppStorage("runBrokenCaskCheck") var runBrokenCaskCheck = true
+    @AppStorage("notifyOnSuccess")    var notifyOnSuccess    = true
+    @AppStorage("preScript")          var preScript          = ""
+    @AppStorage("postScript")         var postScript         = ""
+}
+
+struct PrefsView: View {
+    @ObservedObject var prefs = Prefs.shared
+
+    var body: some View {
+        Form {
+            Section("Update Steps") {
+                Toggle("Update Mac App Store apps (mas)", isOn: $prefs.runMas)
+                Toggle("Clean Homebrew cache after upgrade", isOn: $prefs.runCleanup)
+                Toggle("Check for broken casks", isOn: $prefs.runBrokenCaskCheck)
+            }
+            Section("Notifications") {
+                Toggle("Notify on success", isOn: $prefs.notifyOnSuccess)
+            }
+            Section(header: Text("Pre-update Script"),
+                    footer: Text("Runs before brew update. Leave empty to skip.").foregroundStyle(.secondary)) {
+                TextEditor(text: $prefs.preScript)
+                    .font(.system(size: 12, design: .monospaced))
+                    .frame(minHeight: 70)
+            }
+            Section(header: Text("Post-update Script"),
+                    footer: Text("Runs after all steps complete. Leave empty to skip.").foregroundStyle(.secondary)) {
+                TextEditor(text: $prefs.postScript)
+                    .font(.system(size: 12, design: .monospaced))
+                    .frame(minHeight: 70)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 480)
+        .padding(.bottom)
     }
 }
 
@@ -251,6 +304,14 @@ class Updater: ObservableObject {
             self.log("--- Buum run started ---")
             var failed = false
 
+            // Pre-update script
+            let preScript = Prefs.shared.preScript.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !preScript.isEmpty {
+                self.setStatus("Running pre-update script...")
+                self.shell("/bin/bash", ["-c", preScript], env: env, &failed)
+                self.waitIfPromptActive()
+            }
+
             // Install Homebrew if missing
             if !FileManager.default.fileExists(atPath: brewPath) {
                 self.setStatus("Installing Homebrew...")
@@ -274,24 +335,41 @@ class Updater: ObservableObject {
             self.waitIfPromptActive()
 
             self.setStatus("Checking App Store updates...")
-            self.shell(masPath, ["outdated"], env: env, &failed)
-            self.waitIfPromptActive()
+            if Prefs.shared.runMas {
+                self.shell(masPath, ["outdated"], env: env, &failed)
+                self.waitIfPromptActive()
 
-            self.setStatus("Upgrading App Store apps...")
-            self.shellWithAuth("mas upgrade", label: "mas upgrade", env: env, failed: &failed)
-            self.waitIfPromptActive()
+                self.setStatus("Upgrading App Store apps...")
+                self.shellWithAuth("mas upgrade", label: "mas upgrade", env: env, failed: &failed)
+                self.waitIfPromptActive()
+            }
 
             self.setStatus("Cleaning up Homebrew cache...")
-            self.shell(brewPath, ["cleanup", "--prune=all"], env: env, &failed)
-            self.waitIfPromptActive()
+            if Prefs.shared.runCleanup {
+                self.shell(brewPath, ["cleanup", "--prune=all"], env: env, &failed)
+                self.waitIfPromptActive()
+            }
 
             self.setStatus("Checking for broken casks...")
-            let brokenCasks = self.findBrokenCasks(brewPath: brewPath, env: env)
+            let brokenCasks: [String]
+            if Prefs.shared.runBrokenCaskCheck {
+                brokenCasks = self.findBrokenCasks(brewPath: brewPath, env: env)
+            } else {
+                brokenCasks = []
+            }
 
             if !brokenCasks.isEmpty {
                 self.setStatus("Disabling \(brokenCasks.count) broken cask(s)...")
                 self.ignoreBrokenCasks(brokenCasks)
                 self.log("Disabled broken casks: \(brokenCasks.joined(separator: ", "))")
+            }
+
+            // Post-update script
+            let postScript = Prefs.shared.postScript.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !postScript.isEmpty {
+                self.setStatus("Running post-update script...")
+                self.shell("/bin/bash", ["-c", postScript], env: env, &failed)
+                self.waitIfPromptActive()
             }
 
             self.log("--- Buum run finished (success: \(!failed)) ---\n")
@@ -650,6 +728,8 @@ class Updater: ObservableObject {
     }
 
     func notify(success: Bool, brokenCasks: [String] = []) {
+        // Skip notification on success if the user opted out
+        if success && brokenCasks.isEmpty && !Prefs.shared.notifyOnSuccess { return }
         let content = UNMutableNotificationContent()
         content.title = "Buum"
         if !brokenCasks.isEmpty {
