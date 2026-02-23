@@ -38,6 +38,10 @@ struct BuumApp: App {
             .disabled(updater.isRunning)
             .keyboardShortcut("u")
             Divider()
+            Button("Show Log") {
+                NSWorkspace.shared.open(updater.logURL)
+            }
+            Divider()
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
             }
@@ -56,6 +60,29 @@ class Updater: ObservableObject {
     @Published var isRunning = false
     @Published var status = "Idle"
 
+    let logURL: URL = {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/Buum")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("buum.log")
+    }()
+
+    func log(_ message: String) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let line = "[\(formatter.string(from: Date()))] \(message)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: logURL.path),
+               let handle = try? FileHandle(forWritingTo: logURL) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                handle.closeFile()
+            } else {
+                try? data.write(to: logURL)
+            }
+        }
+    }
+
     func run() {
         guard !isRunning else { return }
         isRunning = true
@@ -69,49 +96,51 @@ class Updater: ObservableObject {
                 return e
             }()
 
+            self.log("--- Buum run started ---")
+            var failed = false
+
             // Install Homebrew if missing
             if !FileManager.default.fileExists(atPath: brewPath) {
                 self.setStatus("Installing Homebrew...")
-                self.shell("/bin/bash", ["-c", #"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#], env: env)
+                self.shell("/bin/bash", ["-c", #"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#], env: env, &failed)
             }
 
             // Install mas if missing
             if !FileManager.default.fileExists(atPath: masPath) {
                 self.setStatus("Installing mas...")
-                self.shell(brewPath, ["install", "mas"], env: env)
+                self.shell(brewPath, ["install", "mas"], env: env, &failed)
             }
 
-            // Update & upgrade Homebrew
             self.setStatus("Updating Homebrew...")
-            self.shell(brewPath, ["update"], env: env)
+            self.shell(brewPath, ["update"], env: env, &failed)
 
             self.setStatus("Upgrading packages...")
-            self.shell(brewPath, ["upgrade"], env: env)
+            self.shell(brewPath, ["upgrade"], env: env, &failed)
 
-            // Update Mac App Store apps
             self.setStatus("Checking App Store updates...")
-            self.shell(masPath, ["outdated"], env: env)
+            self.shell(masPath, ["outdated"], env: env, &failed)
 
             self.setStatus("Upgrading App Store apps...")
-            self.shell(masPath, ["upgrade"], env: env)
+            self.shell(masPath, ["upgrade"], env: env, &failed)
 
-            // Clean up old versions and cache
             self.setStatus("Cleaning up Homebrew cache...")
-            self.shell(brewPath, ["cleanup", "--prune=all"], env: env)
+            self.shell(brewPath, ["cleanup", "--prune=all"], env: env, &failed)
 
-            // Detect and auto-ignore broken casks
             self.setStatus("Checking for broken casks...")
             let brokenCasks = self.findBrokenCasks(brewPath: brewPath, env: env)
 
             if !brokenCasks.isEmpty {
                 self.setStatus("Disabling \(brokenCasks.count) broken cask(s)...")
                 self.ignoreBrokenCasks(brokenCasks)
+                self.log("Disabled broken casks: \(brokenCasks.joined(separator: ", "))")
             }
+
+            self.log("--- Buum run finished (success: \(!failed)) ---\n")
 
             DispatchQueue.main.async {
                 self.isRunning = false
                 self.status = "Idle"
-                self.notify(success: true, brokenCasks: brokenCasks)
+                self.notify(success: !failed, brokenCasks: brokenCasks)
             }
         }
     }
@@ -166,13 +195,33 @@ class Updater: ObservableObject {
     }
 
     @discardableResult
-    func shell(_ path: String, _ args: [String], env: [String: String]) -> Int32 {
+    func shell(_ path: String, _ args: [String], env: [String: String], _ failed: inout Bool) -> Int32 {
         let task = Process()
         task.launchPath = path
         task.arguments = args
         task.environment = env
+
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        task.standardOutput = outPipe
+        task.standardError = errPipe
+
         task.launch()
         task.waitUntilExit()
+
+        let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let cmd = ([path] + args).joined(separator: " ")
+
+        log("$ \(cmd) [exit: \(task.terminationStatus)]")
+        if !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            log("stdout: \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        if !err.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            log("stderr: \(err.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+
+        if task.terminationStatus != 0 { failed = true }
         return task.terminationStatus
     }
 
