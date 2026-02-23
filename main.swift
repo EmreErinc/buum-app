@@ -34,6 +34,8 @@ struct BuumApp: App {
                 Image(systemName: "arrow.triangle.2.circlepath")
             } else if updater.hasIssues {
                 Image(systemName: "exclamationmark.triangle.fill")
+            } else if updater.outdatedPackages.count > 0 {
+                Label("\(updater.outdatedPackages.count)", systemImage: "shippingbox.fill")
             } else {
                 Image(systemName: "shippingbox.fill")
             }
@@ -85,6 +87,11 @@ struct MenuContent: View {
         }
         .disabled(updater.isRunning || updater.isCheckingOutdated)
         .keyboardShortcut("c")
+        if updater.lastDiskFreed > 0 {
+            Text("🧹 Last cleanup freed \(updater.lastDiskFreed / 1_000_000) MB")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
         Divider()
         Button("Run Updates (buum)") {
             updater.run()
@@ -151,6 +158,12 @@ struct MenuContent: View {
             NSApp.activate(ignoringOtherApps: true)
         }
         .keyboardShortcut(",")
+        if let v = updater.updateAvailable {
+            Divider()
+            Button("⬆️ Update available: v\(v)") {
+                NSWorkspace.shared.open(URL(string: "https://github.com/emreerinc/buum-app/releases/latest")!)
+            }
+        }
         Button("Quit") {
             NSApplication.shared.terminate(nil)
         }
@@ -162,12 +175,17 @@ struct MenuContent: View {
 
 class Prefs: ObservableObject {
     static let shared = Prefs()
-    @AppStorage("runMas")             var runMas             = true
-    @AppStorage("runCleanup")         var runCleanup         = true
-    @AppStorage("runBrokenCaskCheck") var runBrokenCaskCheck = true
-    @AppStorage("notifyOnSuccess")    var notifyOnSuccess    = true
-    @AppStorage("preScript")          var preScript          = ""
-    @AppStorage("postScript")         var postScript         = ""
+    @AppStorage("runMas")               var runMas               = true
+    @AppStorage("runCleanup")           var runCleanup           = true
+    @AppStorage("runBrokenCaskCheck")   var runBrokenCaskCheck   = true
+    @AppStorage("notifyOnSuccess")      var notifyOnSuccess      = true
+    @AppStorage("preScript")            var preScript            = ""
+    @AppStorage("postScript")           var postScript           = ""
+    @AppStorage("runOnWake")            var runOnWake            = false
+    @AppStorage("dryRun")               var dryRun               = false
+    @AppStorage("backupBeforeUpgrade")  var backupBeforeUpgrade  = false
+    @AppStorage("scheduleEnabled")      var scheduleEnabled      = false
+    @AppStorage("scheduleHours")        var scheduleHours        = 24
 }
 
 struct PrefsView: View {
@@ -179,9 +197,24 @@ struct PrefsView: View {
                 Toggle("Update Mac App Store apps (mas)", isOn: $prefs.runMas)
                 Toggle("Clean Homebrew cache after upgrade", isOn: $prefs.runCleanup)
                 Toggle("Check for broken casks", isOn: $prefs.runBrokenCaskCheck)
+                Toggle("Dry run (preview only, no changes)", isOn: $prefs.dryRun)
+                Toggle("Backup package list before upgrading (brew bundle dump)", isOn: $prefs.backupBeforeUpgrade)
             }
             Section("Notifications") {
                 Toggle("Notify on success", isOn: $prefs.notifyOnSuccess)
+            }
+            Section(header: Text("Automation"),
+                    footer: Text("Schedule takes effect on next app launch.").foregroundStyle(.secondary)) {
+                Toggle("Run updates on wake from sleep", isOn: $prefs.runOnWake)
+                Toggle("Run updates on a schedule", isOn: $prefs.scheduleEnabled)
+                if prefs.scheduleEnabled {
+                    Picker("Interval", selection: $prefs.scheduleHours) {
+                        Text("Every 6 hours").tag(6)
+                        Text("Daily").tag(24)
+                        Text("Weekly").tag(168)
+                    }
+                    .pickerStyle(.segmented)
+                }
             }
             Section(header: Text("Pre-update Script"),
                     footer: Text("Runs before brew update. Leave empty to skip.").foregroundStyle(.secondary)) {
@@ -235,8 +268,26 @@ class Updater: ObservableObject {
     @Published var isCheckingOutdated = false
     @Published var services: [BrewService] = []
     @Published var isLoadingServices = false
+    @Published var updateAvailable: String? = nil
+    @Published var lastDiskFreed: Int64 = 0
 
-    init() { fetchOutdated(); fetchServices() }
+    private var scheduleTimer: Timer?
+
+    init() {
+        fetchOutdated()
+        fetchServices()
+        checkForUpdates()
+        setupSchedule()
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.fetchOutdated()
+            self?.fetchServices()
+            if Prefs.shared.runOnWake { self?.run() }
+        }
+    }
 
     private var stdinHandle: FileHandle?
     private let inputSemaphore = DispatchSemaphore(value: 0)   // unblocks readabilityHandler → writes to stdin
@@ -481,6 +532,13 @@ class Updater: ObservableObject {
             self.log("--- Buum run started ---")
             var failed = false
 
+            // Connectivity check
+            if !self.isConnected() {
+                self.appendOutput("⚠️ No internet connection. Skipping run.", isError: false)
+                DispatchQueue.main.async { self.isRunning = false }
+                return
+            }
+
             // Pre-update script
             let preScript = Prefs.shared.preScript.trimmingCharacters(in: .whitespacesAndNewlines)
             if !preScript.isEmpty {
@@ -508,7 +566,14 @@ class Updater: ObservableObject {
             self.waitIfPromptActive()
 
             self.setStatus("Upgrading packages...")
-            self.shell(brewPath, ["upgrade"], env: env, &failed)
+            if Prefs.shared.backupBeforeUpgrade {
+                self.setStatus("Backing up package list...")
+                let backupPath = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/homebrew/Brewfile.bak").path
+                self.shell(brewPath, ["bundle", "dump", "--force", "--file=\(backupPath)"], env: env, &failed)
+                self.waitIfPromptActive()
+            }
+            let upgradeArgs = Prefs.shared.dryRun ? ["upgrade", "--dry-run"] : ["upgrade"]
+            self.shell(brewPath, upgradeArgs, env: env, &failed)
             self.waitIfPromptActive()
 
             self.setStatus("Checking App Store updates...")
@@ -523,8 +588,15 @@ class Updater: ObservableObject {
 
             self.setStatus("Cleaning up Homebrew cache...")
             if Prefs.shared.runCleanup {
+                let beforeCleanup = self.diskFreeBytes()
                 self.shell(brewPath, ["cleanup", "--prune=all"], env: env, &failed)
                 self.waitIfPromptActive()
+                let freed = self.diskFreeBytes() - beforeCleanup
+                if freed > 0 {
+                    let mb = freed / 1_000_000
+                    self.appendOutput("🧹 Freed \(mb) MB", isError: false)
+                    DispatchQueue.main.async { self.lastDiskFreed = freed }
+                }
             }
 
             self.setStatus("Checking for broken casks...")
@@ -904,6 +976,44 @@ class Updater: ObservableObject {
         if exitCode != 0 { failed = true }
     }
 
+    func isConnected() -> Bool {
+        let task = Process()
+        task.launchPath = "/sbin/ping"
+        task.arguments = ["-c", "1", "-W", "2000", "8.8.8.8"]
+        task.standardOutput = Pipe(); task.standardError = Pipe()
+        task.launch(); task.waitUntilExit()
+        return task.terminationStatus == 0
+    }
+
+    private func diskFreeBytes() -> Int64 {
+        let attrs = try? FileManager.default.attributesOfFileSystem(forPath: "/")
+        return (attrs?[.systemFreeSize] as? NSNumber)?.int64Value ?? 0
+    }
+
+    func checkForUpdates() {
+        let current = "1.8.0"
+        guard let url = URL(string: "https://api.github.com/repos/emreerinc/buum-app/releases/latest") else { return }
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tag = json["tag_name"] as? String else { return }
+            let latest = tag.trimmingCharacters(in: CharacterSet(charactersIn: "v"))
+            if latest > current {
+                DispatchQueue.main.async { self.updateAvailable = latest }
+            }
+        }.resume()
+    }
+
+    func setupSchedule() {
+        scheduleTimer?.invalidate()
+        scheduleTimer = nil
+        guard Prefs.shared.scheduleEnabled, Prefs.shared.scheduleHours > 0 else { return }
+        let interval = TimeInterval(Prefs.shared.scheduleHours * 3600)
+        scheduleTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            self?.run()
+        }
+    }
+
     func notify(success: Bool, brokenCasks: [String] = []) {
         // Skip notification on success if the user opted out
         if success && brokenCasks.isEmpty && !Prefs.shared.notifyOnSuccess { return }
@@ -940,7 +1050,12 @@ struct TerminalView: View {
     @ObservedObject var updater: Updater
     @State private var autoScroll = true
     @State private var password = ""
+    @State private var searchText = ""
     @FocusState private var passwordFocused: Bool
+
+    private var displayedLines: [Updater.OutputLine] {
+        searchText.isEmpty ? updater.output : updater.output.filter { $0.text.localizedCaseInsensitiveContains(searchText) }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -949,6 +1064,11 @@ struct TerminalView: View {
                 Circle().fill(.red).frame(width: 12, height: 12)
                 Circle().fill(.yellow).frame(width: 12, height: 12)
                 Circle().fill(.green).frame(width: 12, height: 12)
+                TextField("Filter…", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.white)
+                    .frame(width: 160)
                 Spacer()
                 Text(updater.isRunning ? updater.status : "Done")
                     .font(.system(size: 11, design: .monospaced))
@@ -969,7 +1089,7 @@ struct TerminalView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(updater.output) { line in
+                        ForEach(displayedLines) { line in
                             Text(line.text)
                                 .font(.system(size: 12, design: .monospaced))
                                 .foregroundStyle(line.isError ? Color.red.opacity(0.85) : Color.green.opacity(0.9))
@@ -1002,6 +1122,14 @@ struct TerminalView: View {
                     .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
                     .disabled(updater.isRunning)
+                Button("Copy") {
+                    let text = updater.output.map { $0.text }.joined(separator: "\n")
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                }
+                .font(.system(size: 11))
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
