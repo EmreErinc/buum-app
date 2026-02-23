@@ -69,33 +69,99 @@ class Updater: ObservableObject {
                 return e
             }()
 
+            // Install Homebrew if missing
             if !FileManager.default.fileExists(atPath: brewPath) {
                 self.setStatus("Installing Homebrew...")
                 self.shell("/bin/bash", ["-c", #"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#], env: env)
             }
 
+            // Install mas if missing
             if !FileManager.default.fileExists(atPath: masPath) {
                 self.setStatus("Installing mas...")
-                self.shell("/opt/homebrew/bin/brew", ["install", "mas"], env: env)
+                self.shell(brewPath, ["install", "mas"], env: env)
             }
 
+            // Update & upgrade Homebrew
             self.setStatus("Updating Homebrew...")
             self.shell(brewPath, ["update"], env: env)
 
             self.setStatus("Upgrading packages...")
             self.shell(brewPath, ["upgrade"], env: env)
 
+            // Update Mac App Store apps
             self.setStatus("Checking App Store updates...")
             self.shell(masPath, ["outdated"], env: env)
 
             self.setStatus("Upgrading App Store apps...")
-            let result = self.shell(masPath, ["upgrade"], env: env)
+            self.shell(masPath, ["upgrade"], env: env)
+
+            // Clean up old versions and cache
+            self.setStatus("Cleaning up Homebrew cache...")
+            self.shell(brewPath, ["cleanup", "--prune=all"], env: env)
+
+            // Detect and auto-ignore broken casks
+            self.setStatus("Checking for broken casks...")
+            let brokenCasks = self.findBrokenCasks(brewPath: brewPath, env: env)
+
+            if !brokenCasks.isEmpty {
+                self.setStatus("Disabling \(brokenCasks.count) broken cask(s)...")
+                self.ignoreBrokenCasks(brokenCasks)
+            }
 
             DispatchQueue.main.async {
                 self.isRunning = false
                 self.status = "Idle"
-                self.notify(success: result == 0)
+                self.notify(success: true, brokenCasks: brokenCasks)
             }
+        }
+    }
+
+    // Returns list of installed casks that fail `brew info --cask`
+    private func findBrokenCasks(brewPath: String, env: [String: String]) -> [String] {
+        let task = Process()
+        task.launchPath = brewPath
+        task.arguments = ["list", "--cask"]
+        task.environment = env
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = Pipe()
+        task.launch()
+        task.waitUntilExit()
+
+        let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let casks = output.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
+
+        return casks.filter { cask in
+            let check = Process()
+            check.launchPath = brewPath
+            check.arguments = ["info", "--cask", cask]
+            check.environment = env
+            check.standardOutput = Pipe()
+            check.standardError = Pipe()
+            check.launch()
+            check.waitUntilExit()
+            return check.terminationStatus != 0
+        }
+    }
+
+    // Writes broken casks to ~/.config/homebrew/ignored-casks.rb
+    private func ignoreBrokenCasks(_ casks: [String]) {
+        let configDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/homebrew")
+        try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
+
+        let ignoredFile = configDir.appendingPathComponent("ignored-casks.rb")
+        let lines = casks.map { "cask '\($0)' do\n  disable!\nend" }.joined(separator: "\n")
+        let data = (lines + "\n").data(using: .utf8)
+
+        if FileManager.default.fileExists(atPath: ignoredFile.path) {
+            if let handle = try? FileHandle(forWritingTo: ignoredFile) {
+                handle.seekToEndOfFile()
+                handle.write(data ?? Data())
+                handle.closeFile()
+            }
+        } else {
+            try? data?.write(to: ignoredFile)
         }
     }
 
@@ -114,10 +180,14 @@ class Updater: ObservableObject {
         DispatchQueue.main.async { self.status = message }
     }
 
-    func notify(success: Bool) {
+    func notify(success: Bool, brokenCasks: [String] = []) {
         let content = UNMutableNotificationContent()
         content.title = "Buum"
-        content.body = success ? "All updates completed!" : "Updates finished with errors."
+        if !brokenCasks.isEmpty {
+            content.body = "✅ Done! Disabled \(brokenCasks.count) broken cask(s): \(brokenCasks.joined(separator: ", "))"
+        } else {
+            content.body = success ? "✅ All updates completed & cache cleaned!" : "⚠️ Updates finished with errors."
+        }
         content.sound = .default
         let req = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(req)
