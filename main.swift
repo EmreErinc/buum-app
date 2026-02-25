@@ -1120,7 +1120,7 @@ class Updater: ObservableObject {
     }
 
     func checkForUpdates() {
-        let current = "1.9.0"
+        let current = "1.9.1"
         guard let url = URL(string: "https://api.github.com/repos/emreerinc/buum-app/releases/latest") else { return }
         URLSession.shared.dataTask(with: url) { data, _, _ in
             guard let data = data,
