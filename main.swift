@@ -636,6 +636,17 @@ class Updater: ObservableObject {
                 self.waitIfPromptActive()
             }
 
+            // Reinstall casks with broken app references (e.g. renamed apps)
+            let brokenUpgrades = self.brokenCaskUpgrades(since: upgradeStart)
+            if !brokenUpgrades.isEmpty && !Prefs.shared.dryRun {
+                self.setStatus("Reinstalling \(brokenUpgrades.count) broken cask(s)...")
+                for cask in brokenUpgrades {
+                    self.appendOutput("🔁 Reinstalling broken cask: \(cask)")
+                    self.shell(brewPath, ["reinstall", "--cask", "--force", cask], env: env, &failed)
+                    self.waitIfPromptActive()
+                }
+            }
+
             self.setStatus("Checking App Store updates...")
             if Prefs.shared.runMas {
                 self.shell(masPath, ["outdated"], env: env, &failed)
@@ -1186,6 +1197,17 @@ class Updater: ObservableObject {
                 let parts = line.text.components(separatedBy: "Skipping ")
                 guard parts.count >= 2 else { return nil }
                 return parts[1].components(separatedBy: ":").first?.trimmingCharacters(in: .whitespaces)
+            }
+    }
+
+    // Parses "Error: cask-name: It seems the App source ... is not there." lines
+    private func brokenCaskUpgrades(since startIndex: Int) -> [String] {
+        output.dropFirst(startIndex)
+            .filter { $0.text.contains("It seems the App source") || $0.text.contains("is not there") }
+            .compactMap { line -> String? in
+                // "Error: kiro-cli: It seems the App source ..."
+                let text = line.text.hasPrefix("Error: ") ? String(line.text.dropFirst(7)) : line.text
+                return text.components(separatedBy: ":").first?.trimmingCharacters(in: .whitespaces)
             }
     }
 
