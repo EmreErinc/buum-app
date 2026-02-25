@@ -182,6 +182,7 @@ class Prefs: ObservableObject {
     @AppStorage("preScript")            var preScript            = ""
     @AppStorage("postScript")           var postScript           = ""
     @AppStorage("runOnWake")            var runOnWake            = false
+    @AppStorage("greedyUpgrade")        var greedyUpgrade        = false
     @AppStorage("dryRun")               var dryRun               = false
     @AppStorage("backupBeforeUpgrade")  var backupBeforeUpgrade  = false
     @AppStorage("scheduleEnabled")      var scheduleEnabled      = false
@@ -197,6 +198,7 @@ struct PrefsView: View {
                 Toggle("Update Mac App Store apps (mas)", isOn: $prefs.runMas)
                 Toggle("Clean Homebrew cache after upgrade", isOn: $prefs.runCleanup)
                 Toggle("Check for broken casks", isOn: $prefs.runBrokenCaskCheck)
+                Toggle("Upgrade casks with auto-updates or latest version (--greedy)", isOn: $prefs.greedyUpgrade)
                 Toggle("Dry run (preview only, no changes)", isOn: $prefs.dryRun)
                 Toggle("Backup package list before upgrading (brew bundle dump)", isOn: $prefs.backupBeforeUpgrade)
             }
@@ -572,7 +574,9 @@ class Updater: ObservableObject {
                 self.shell(brewPath, ["bundle", "dump", "--force", "--file=\(backupPath)"], env: env, &failed)
                 self.waitIfPromptActive()
             }
-            let upgradeArgs = Prefs.shared.dryRun ? ["upgrade", "--dry-run"] : ["upgrade"]
+            var upgradeArgs = ["upgrade"]
+            if Prefs.shared.greedyUpgrade { upgradeArgs.append("--greedy") }
+            if Prefs.shared.dryRun        { upgradeArgs.append("--dry-run") }
             self.shell(brewPath, upgradeArgs, env: env, &failed)
             self.waitIfPromptActive()
 
