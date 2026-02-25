@@ -160,9 +160,11 @@ struct MenuContent: View {
         .keyboardShortcut(",")
         if let v = updater.updateAvailable {
             Divider()
-            Button("⬆️ Update available: v\(v)") {
-                NSWorkspace.shared.open(URL(string: "https://github.com/emreerinc/buum-app/releases/latest")!)
+            Button(updater.isUpdating ? "⬇️ Installing update…" : "⬆️ Update to v\(v)") {
+                updater.performUpdate(version: v)
+                openWindow(id: "output")
             }
+            .disabled(updater.isRunning || updater.isUpdating)
         }
         Button("Quit") {
             NSApplication.shared.terminate(nil)
@@ -271,6 +273,7 @@ class Updater: ObservableObject {
     @Published var services: [BrewService] = []
     @Published var isLoadingServices = false
     @Published var updateAvailable: String? = nil
+    @Published var isUpdating = false
     @Published var lastDiskFreed: Int64 = 0
 
     private var scheduleTimer: Timer?
@@ -995,7 +998,7 @@ class Updater: ObservableObject {
     }
 
     func checkForUpdates() {
-        let current = "1.8.0"
+        let current = "1.9.0"
         guard let url = URL(string: "https://api.github.com/repos/emreerinc/buum-app/releases/latest") else { return }
         URLSession.shared.dataTask(with: url) { data, _, _ in
             guard let data = data,
@@ -1006,6 +1009,66 @@ class Updater: ObservableObject {
                 DispatchQueue.main.async { self.updateAvailable = latest }
             }
         }.resume()
+    }
+
+    func performUpdate(version: String) {
+        guard !isUpdating && !isRunning else { return }
+        isUpdating = true
+        output = []
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let tempDir = FileManager.default.temporaryDirectory
+                .appendingPathComponent("BuumUpdate-\(version)")
+            let zipPath = tempDir.appendingPathComponent("Buum-\(version).zip")
+            let scriptPath = tempDir.appendingPathComponent("update.sh")
+
+            do {
+                try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+                // Download ZIP
+                self.appendOutput("⬇️ Downloading Buum v\(version)…")
+                self.setStatus("Downloading v\(version)…")
+                guard let zipURL = URL(string: "https://github.com/emreerinc/buum-app/releases/download/v\(version)/Buum-\(version).zip") else { throw NSError(domain: "Buum", code: 1) }
+                let data = try Data(contentsOf: zipURL)
+                try data.write(to: zipPath)
+                self.appendOutput("✅ Download complete (\(data.count / 1024) KB)")
+
+                // Write update script — runs after app quits
+                let script = """
+                #!/bin/bash
+                sleep 2
+                cd "\(tempDir.path)"
+                unzip -o "\(zipPath.path)" -d "\(tempDir.path)" > /dev/null 2>&1
+                cp -rf "\(tempDir.path)/Buum.app" "/Applications/Buum.app"
+                codesign --force --deep --sign - "/Applications/Buum.app" > /dev/null 2>&1
+                open "/Applications/Buum.app"
+                rm -rf "\(tempDir.path)"
+                """
+                try script.write(toFile: scriptPath.path, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                                      ofItemAtPath: scriptPath.path)
+
+                self.appendOutput("🔄 Installing and restarting…")
+                self.setStatus("Restarting…")
+
+                // Launch update script detached, then quit
+                let task = Process()
+                task.launchPath = "/bin/bash"
+                task.arguments = [scriptPath.path]
+                task.launch()
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                    NSApplication.shared.terminate(nil)
+                }
+            } catch {
+                self.appendOutput("❌ Update failed: \(error.localizedDescription)", isError: true)
+                self.log("Update error: \(error)")
+                DispatchQueue.main.async {
+                    self.isUpdating = false
+                    self.status = "Idle"
+                }
+            }
+        }
     }
 
     func setupSchedule() {
