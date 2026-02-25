@@ -191,16 +191,120 @@ class Prefs: ObservableObject {
 }
 
 struct PrefsView: View {
+    @State private var selectedTab = 0
+    private let tabs = [
+        ("gearshape.fill", "General"),
+        ("clock.fill", "Automation"),
+        ("terminal.fill", "Scripts")
+    ]
+
     var body: some View {
-        TabView {
-            GeneralPrefsTab()
-                .tabItem { Label("General", systemImage: "gearshape") }
-            AutomationPrefsTab()
-                .tabItem { Label("Automation", systemImage: "clock") }
-            ScriptsPrefsTab()
-                .tabItem { Label("Scripts", systemImage: "terminal") }
+        HStack(spacing: 0) {
+            // Sidebar
+            VStack(spacing: 2) {
+                ForEach(Array(tabs.enumerated()), id: \.offset) { i, tab in
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) { selectedTab = i }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: tab.0)
+                                .font(.system(size: 13))
+                                .frame(width: 20)
+                            Text(tab.1)
+                                .font(.system(size: 13, weight: .medium))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(selectedTab == i ? Color.accentColor.opacity(0.15) : Color.clear)
+                        )
+                        .foregroundColor(selectedTab == i ? .accentColor : .primary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                Spacer()
+                Text("Buum")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                    .padding(.bottom, 8)
+            }
+            .padding(.top, 16)
+            .padding(.horizontal, 8)
+            .frame(width: 160)
+            .background(Color(nsColor: .controlBackgroundColor))
+
+            Divider()
+
+            // Content
+            VStack(alignment: .leading, spacing: 0) {
+                Text(tabs[selectedTab].1)
+                    .font(.system(size: 18, weight: .semibold))
+                    .padding(.horizontal, 24)
+                    .padding(.top, 20)
+                    .padding(.bottom, 4)
+
+                Group {
+                    switch selectedTab {
+                    case 0: GeneralPrefsTab()
+                    case 1: AutomationPrefsTab()
+                    case 2: ScriptsPrefsTab()
+                    default: EmptyView()
+                    }
+                }
+                .transition(.opacity)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(width: 460, height: 320)
+        .frame(width: 540, height: 380)
+    }
+}
+
+struct PrefToggleRow: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Toggle("", isOn: $isOn)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .labelsHidden()
+        }
+        .padding(.vertical, 3)
+    }
+}
+
+struct PrefSectionHeader: View {
+    let title: String
+    var body: some View {
+        Text(title)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .textCase(.uppercase)
+            .padding(.top, 8)
+            .padding(.bottom, 2)
     }
 }
 
@@ -208,22 +312,43 @@ struct GeneralPrefsTab: View {
     @ObservedObject var prefs = Prefs.shared
 
     var body: some View {
-        Form {
-            Section("Upgrade") {
-                Toggle("Mac App Store apps (mas)", isOn: $prefs.runMas)
-                Toggle("Greedy cask upgrades (--greedy)", isOn: $prefs.greedyUpgrade)
-                Toggle("Dry run (preview only)", isOn: $prefs.dryRun)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                PrefSectionHeader(title: "Upgrade")
+                VStack(spacing: 0) {
+                    PrefToggleRow(icon: "app.badge", title: "Mac App Store", subtitle: "Include mas apps in updates", isOn: $prefs.runMas)
+                    Divider().padding(.leading, 28)
+                    PrefToggleRow(icon: "arrow.triangle.2.circlepath", title: "Greedy upgrades", subtitle: "Update auto-updating casks too", isOn: $prefs.greedyUpgrade)
+                    Divider().padding(.leading, 28)
+                    PrefToggleRow(icon: "eye", title: "Dry run", subtitle: "Preview changes without installing", isOn: $prefs.dryRun)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+
+                PrefSectionHeader(title: "After Upgrade")
+                VStack(spacing: 0) {
+                    PrefToggleRow(icon: "trash", title: "Clean cache", subtitle: "Remove old downloads and versions", isOn: $prefs.runCleanup)
+                    Divider().padding(.leading, 28)
+                    PrefToggleRow(icon: "bandage", title: "Check broken casks", subtitle: "Detect and fix renamed cask references", isOn: $prefs.runBrokenCaskCheck)
+                    Divider().padding(.leading, 28)
+                    PrefToggleRow(icon: "doc.on.doc", title: "Backup Brewfile", subtitle: "Save package list before upgrading", isOn: $prefs.backupBeforeUpgrade)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+
+                PrefSectionHeader(title: "Notifications")
+                VStack(spacing: 0) {
+                    PrefToggleRow(icon: "bell", title: "Success alerts", subtitle: "Show notification when updates finish", isOn: $prefs.notifyOnSuccess)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
             }
-            Section("After Upgrade") {
-                Toggle("Clean Homebrew cache", isOn: $prefs.runCleanup)
-                Toggle("Check for broken casks", isOn: $prefs.runBrokenCaskCheck)
-                Toggle("Backup Brewfile before upgrade", isOn: $prefs.backupBeforeUpgrade)
-            }
-            Section("Notifications") {
-                Toggle("Notify on success", isOn: $prefs.notifyOnSuccess)
-            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 16)
         }
-        .formStyle(.grouped)
     }
 }
 
@@ -231,23 +356,52 @@ struct AutomationPrefsTab: View {
     @ObservedObject var prefs = Prefs.shared
 
     var body: some View {
-        Form {
-            Section(footer: Text("Automatically run updates when your Mac wakes from sleep.").foregroundStyle(.secondary)) {
-                Toggle("Run on wake", isOn: $prefs.runOnWake)
-            }
-            Section(footer: Text("Takes effect on next app launch.").foregroundStyle(.secondary)) {
-                Toggle("Scheduled updates", isOn: $prefs.scheduleEnabled)
-                if prefs.scheduleEnabled {
-                    Picker("Interval", selection: $prefs.scheduleHours) {
-                        Text("Every 6 hours").tag(6)
-                        Text("Daily").tag(24)
-                        Text("Weekly").tag(168)
-                    }
-                    .pickerStyle(.segmented)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                PrefSectionHeader(title: "Triggers")
+                VStack(spacing: 0) {
+                    PrefToggleRow(icon: "moon.fill", title: "Run on wake", subtitle: "Start updates when Mac wakes from sleep", isOn: $prefs.runOnWake)
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+
+                PrefSectionHeader(title: "Schedule")
+                VStack(spacing: 0) {
+                    PrefToggleRow(icon: "calendar.badge.clock", title: "Scheduled updates", subtitle: "Run automatically at a set interval", isOn: $prefs.scheduleEnabled)
+                    if prefs.scheduleEnabled {
+                        Divider().padding(.leading, 28)
+                        HStack(spacing: 10) {
+                            Image(systemName: "repeat")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .frame(width: 18)
+                            Text("Interval").font(.system(size: 13))
+                            Spacer()
+                            Picker("", selection: $prefs.scheduleHours) {
+                                Text("6 hours").tag(6)
+                                Text("Daily").tag(24)
+                                Text("Weekly").tag(168)
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                            .frame(width: 200)
+                        }
+                        .padding(.vertical, 6)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 4)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+
+                Text("Schedule changes take effect on next app launch.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 4)
             }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 16)
         }
-        .formStyle(.grouped)
     }
 }
 
@@ -255,21 +409,31 @@ struct ScriptsPrefsTab: View {
     @ObservedObject var prefs = Prefs.shared
 
     var body: some View {
-        Form {
-            Section(header: Text("Pre-update"),
-                    footer: Text("Runs before brew update. Leave empty to skip.").foregroundStyle(.secondary)) {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 4) {
+                PrefSectionHeader(title: "Pre-update script")
+                Text("Runs before brew update. Leave empty to skip.")
+                    .font(.system(size: 11)).foregroundStyle(.tertiary).padding(.leading, 4)
                 TextEditor(text: $prefs.preScript)
                     .font(.system(size: 12, design: .monospaced))
                     .frame(minHeight: 100)
-            }
-            Section(header: Text("Post-update"),
-                    footer: Text("Runs after all steps complete. Leave empty to skip.").foregroundStyle(.secondary)) {
+                    .padding(4)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor), lineWidth: 0.5))
+
+                PrefSectionHeader(title: "Post-update script")
+                Text("Runs after all steps complete. Leave empty to skip.")
+                    .font(.system(size: 11)).foregroundStyle(.tertiary).padding(.leading, 4)
                 TextEditor(text: $prefs.postScript)
                     .font(.system(size: 12, design: .monospaced))
                     .frame(minHeight: 100)
+                    .padding(4)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color(nsColor: .separatorColor), lineWidth: 0.5))
             }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 16)
         }
-        .formStyle(.grouped)
     }
 }
 
@@ -1120,7 +1284,7 @@ class Updater: ObservableObject {
     }
 
     func checkForUpdates() {
-        let current = "1.9.1"
+        let current = "1.9.2"
         guard let url = URL(string: "https://api.github.com/repos/emreerinc/buum-app/releases/latest") else { return }
         URLSession.shared.dataTask(with: url) { data, _, _ in
             guard let data = data,
