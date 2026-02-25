@@ -619,7 +619,7 @@ class Updater: ObservableObject {
             if Prefs.shared.greedyUpgrade { upgradeArgs.append("--greedy") }
             if Prefs.shared.dryRun        { upgradeArgs.append("--dry-run") }
             let upgradeStart = self.output.count
-            self.shell(brewPath, upgradeArgs, env: env, &failed)
+            self.shellOrAuth(brewPath, upgradeArgs, env: env, &failed)
             self.waitIfPromptActive()
 
             // Force-upgrade any packages brew skipped during upgrade
@@ -627,7 +627,7 @@ class Updater: ObservableObject {
             if !upgradeSkipped.isEmpty && !Prefs.shared.dryRun {
                 self.setStatus("Reinstalling \(upgradeSkipped.count) skipped package(s)...")
                 self.appendOutput("🔁 Reinstalling skipped: \(upgradeSkipped.joined(separator: ", "))")
-                self.shell(brewPath, ["reinstall"] + upgradeSkipped, env: env, &failed)
+                self.shellOrAuth(brewPath, ["reinstall"] + upgradeSkipped, env: env, &failed)
                 self.waitIfPromptActive()
             }
 
@@ -637,17 +637,8 @@ class Updater: ObservableObject {
                 self.waitIfPromptActive()
 
                 self.setStatus("Upgrading App Store apps...")
-                // Try without auth first; mas usually doesn't need sudo
-                let masStart = self.output.count
-                self.shell(masPath, ["upgrade"], env: env, &failed)
+                self.shellOrAuth(masPath, ["upgrade"], env: env, &failed)
                 self.waitIfPromptActive()
-                // If mas failed asking for sudo, retry with macOS auth dialog
-                let masNeededSudo = self.output.dropFirst(masStart).contains { $0.text.contains("sudo") || $0.text.contains("a terminal is required") }
-                if masNeededSudo {
-                    failed = false
-                    self.appendOutput("🔑 Retrying mas upgrade with admin privileges…")
-                    self.shellWithAuth("\(masPath) upgrade", label: "mas upgrade (admin)", env: env, failed: &failed)
-                }
                 self.waitIfPromptActive()
             }
 
@@ -663,7 +654,7 @@ class Updater: ObservableObject {
                 if !cleanupSkipped.isEmpty && !Prefs.shared.dryRun {
                     self.setStatus("Reinstalling \(cleanupSkipped.count) package(s) skipped in cleanup...")
                     self.appendOutput("🔁 Reinstalling: \(cleanupSkipped.joined(separator: ", "))")
-                    self.shell(brewPath, ["reinstall"] + cleanupSkipped, env: env, &failed)
+                    self.shellOrAuth(brewPath, ["reinstall"] + cleanupSkipped, env: env, &failed)
                     self.waitIfPromptActive()
                     self.shell(brewPath, ["cleanup", "--prune=all"], env: env, &failed)
                     self.waitIfPromptActive()
@@ -955,26 +946,20 @@ class Updater: ObservableObject {
         appendOutput("$ \(cmd)", isError: false)
         log("$ \(([path] + args).joined(separator: " "))")
 
-        let passwordPatterns = ["password", "Password", "sudo:"]
-
         // Stream stdout live
         outPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
             self.log("stdout: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
-            let isPrompt = passwordPatterns.contains(where: { text.contains($0) })
-            self.appendOutput(text, isError: false, isPrompt: isPrompt)
-            if isPrompt { self.promptForInput(text) }
+            self.appendOutput(text, isError: false)
         }
 
-        // Stream stderr live — detect password prompts
+        // Stream stderr live
         errPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
             self.log("stderr: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
-            let isPrompt = passwordPatterns.contains(where: { text.contains($0) })
-            self.appendOutput(text, isError: !isPrompt, isPrompt: isPrompt)
-            if isPrompt { self.promptForInput(text) }
+            self.appendOutput(text, isError: true)
         }
 
         task.launch()
@@ -1006,6 +991,25 @@ class Updater: ObservableObject {
 
     func setStatus(_ message: String) {
         DispatchQueue.main.async { self.status = message }
+    }
+
+    // Runs a command; if it fails due to sudo/auth, retries via native macOS password dialog
+    @discardableResult
+    func shellOrAuth(_ path: String, _ args: [String], env: [String: String], _ failed: inout Bool) -> Int32 {
+        let startIdx = output.count
+        let exitCode = shell(path, args, env: env, &failed)
+        if exitCode != 0 {
+            let needsAuth = output.dropFirst(startIdx).contains {
+                $0.text.contains("a terminal is required") || $0.text.contains("sudo:") || $0.text.contains("Permission denied")
+            }
+            if needsAuth {
+                failed = false
+                let cmd = ([path] + args).joined(separator: " ")
+                appendOutput("🔑 Retrying with admin privileges…")
+                shellWithAuth(cmd, label: ([path.components(separatedBy: "/").last ?? path] + args).joined(separator: " ") + " (admin)", env: env, failed: &failed)
+            }
+        }
+        return exitCode
     }
 
     // Runs a shell command via osascript so macOS shows its native auth dialog if needed
