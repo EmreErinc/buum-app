@@ -591,9 +591,9 @@ class Updater: ObservableObject {
             // Force-upgrade any packages brew skipped during upgrade
             let upgradeSkipped = self.skippedPackages(since: upgradeStart)
             if !upgradeSkipped.isEmpty && !Prefs.shared.dryRun {
-                self.setStatus("Force-upgrading \(upgradeSkipped.count) skipped package(s)...")
-                self.appendOutput("🔁 Force-upgrading skipped: \(upgradeSkipped.joined(separator: ", "))")
-                self.shell(brewPath, ["upgrade", "--force"] + upgradeSkipped, env: env, &failed)
+                self.setStatus("Reinstalling \(upgradeSkipped.count) skipped package(s)...")
+                self.appendOutput("🔁 Reinstalling skipped: \(upgradeSkipped.joined(separator: ", "))")
+                self.shell(brewPath, ["reinstall"] + upgradeSkipped, env: env, &failed)
                 self.waitIfPromptActive()
             }
 
@@ -617,9 +617,9 @@ class Updater: ObservableObject {
                 // Force-upgrade any packages cleanup warned about, then re-clean
                 let cleanupSkipped = self.skippedPackages(since: cleanupStart)
                 if !cleanupSkipped.isEmpty && !Prefs.shared.dryRun {
-                    self.setStatus("Force-upgrading \(cleanupSkipped.count) package(s) skipped in cleanup...")
-                    self.appendOutput("🔁 Force-upgrading: \(cleanupSkipped.joined(separator: ", "))")
-                    self.shell(brewPath, ["upgrade", "--force"] + cleanupSkipped, env: env, &failed)
+                    self.setStatus("Reinstalling \(cleanupSkipped.count) package(s) skipped in cleanup...")
+                    self.appendOutput("🔁 Reinstalling: \(cleanupSkipped.joined(separator: ", "))")
+                    self.shell(brewPath, ["reinstall"] + cleanupSkipped, env: env, &failed)
                     self.waitIfPromptActive()
                     self.shell(brewPath, ["cleanup", "--prune=all"], env: env, &failed)
                     self.waitIfPromptActive()
