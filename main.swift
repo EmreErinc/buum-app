@@ -148,12 +148,6 @@ struct MenuContent: View {
             openWindow(id: "output")
         }
         .disabled(updater.output.isEmpty)
-        Button("Rerun Updates") {
-            updater.run()
-            openWindow(id: "output")
-        }
-        .disabled(updater.isRunning)
-        .keyboardShortcut("r")
         Button("Show Log") {
             NSWorkspace.shared.open(updater.logURL)
         }
