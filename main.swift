@@ -184,7 +184,7 @@ class Prefs: ObservableObject {
     @AppStorage("preScript")            var preScript            = ""
     @AppStorage("postScript")           var postScript           = ""
     @AppStorage("runOnWake")            var runOnWake            = false
-    @AppStorage("greedyUpgrade")        var greedyUpgrade        = false
+    @AppStorage("greedyUpgrade")        var greedyUpgrade        = true
     @AppStorage("dryRun")               var dryRun               = false
     @AppStorage("backupBeforeUpgrade")  var backupBeforeUpgrade  = false
     @AppStorage("scheduleEnabled")      var scheduleEnabled      = false
@@ -279,6 +279,10 @@ class Updater: ObservableObject {
     private var scheduleTimer: Timer?
 
     init() {
+        // Migrate: ensure greedy is on for existing installs (was previously off by default)
+        if UserDefaults.standard.object(forKey: "greedyUpgrade") == nil {
+            UserDefaults.standard.set(true, forKey: "greedyUpgrade")
+        }
         fetchOutdated()
         fetchServices()
         checkForUpdates()
