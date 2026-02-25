@@ -587,6 +587,22 @@ class Updater: ObservableObject {
             self.shell(brewPath, upgradeArgs, env: env, &failed)
             self.waitIfPromptActive()
 
+            // Force-upgrade any packages brew skipped
+            let skipped = self.output
+                .filter { $0.text.contains("Warning: Skipping") && $0.text.contains("not installed") }
+                .compactMap { line -> String? in
+                    // "Warning: Skipping ada-url: most recent version 3.4.3 not installed"
+                    let parts = line.text.components(separatedBy: "Skipping ")
+                    guard parts.count >= 2 else { return nil }
+                    return parts[1].components(separatedBy: ":").first?.trimmingCharacters(in: .whitespaces)
+                }
+            if !skipped.isEmpty && !Prefs.shared.dryRun {
+                self.setStatus("Force-upgrading \(skipped.count) skipped package(s)...")
+                self.appendOutput("🔁 Force-upgrading skipped: \(skipped.joined(separator: ", "))")
+                self.shell(brewPath, ["upgrade", "--force"] + skipped, env: env, &failed)
+                self.waitIfPromptActive()
+            }
+
             self.setStatus("Checking App Store updates...")
             if Prefs.shared.runMas {
                 self.shell(masPath, ["outdated"], env: env, &failed)
