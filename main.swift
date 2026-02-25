@@ -49,9 +49,8 @@ struct BuumApp: App {
 
         Window("Buum Preferences", id: "preferences") {
             PrefsView()
-                .frame(minWidth: 480, minHeight: 400)
         }
-        .defaultSize(width: 480, height: 400)
+        .defaultSize(width: 460, height: 320)
     }
 }
 
@@ -192,25 +191,52 @@ class Prefs: ObservableObject {
 }
 
 struct PrefsView: View {
+    var body: some View {
+        TabView {
+            GeneralPrefsTab()
+                .tabItem { Label("General", systemImage: "gearshape") }
+            AutomationPrefsTab()
+                .tabItem { Label("Automation", systemImage: "clock") }
+            ScriptsPrefsTab()
+                .tabItem { Label("Scripts", systemImage: "terminal") }
+        }
+        .frame(width: 460, height: 320)
+    }
+}
+
+struct GeneralPrefsTab: View {
     @ObservedObject var prefs = Prefs.shared
 
     var body: some View {
         Form {
-            Section("Update Steps") {
-                Toggle("Update Mac App Store apps (mas)", isOn: $prefs.runMas)
-                Toggle("Clean Homebrew cache after upgrade", isOn: $prefs.runCleanup)
+            Section("Upgrade") {
+                Toggle("Mac App Store apps (mas)", isOn: $prefs.runMas)
+                Toggle("Greedy cask upgrades (--greedy)", isOn: $prefs.greedyUpgrade)
+                Toggle("Dry run (preview only)", isOn: $prefs.dryRun)
+            }
+            Section("After Upgrade") {
+                Toggle("Clean Homebrew cache", isOn: $prefs.runCleanup)
                 Toggle("Check for broken casks", isOn: $prefs.runBrokenCaskCheck)
-                Toggle("Upgrade casks with auto-updates or latest version (--greedy)", isOn: $prefs.greedyUpgrade)
-                Toggle("Dry run (preview only, no changes)", isOn: $prefs.dryRun)
-                Toggle("Backup package list before upgrading (brew bundle dump)", isOn: $prefs.backupBeforeUpgrade)
+                Toggle("Backup Brewfile before upgrade", isOn: $prefs.backupBeforeUpgrade)
             }
             Section("Notifications") {
                 Toggle("Notify on success", isOn: $prefs.notifyOnSuccess)
             }
-            Section(header: Text("Automation"),
-                    footer: Text("Schedule takes effect on next app launch.").foregroundStyle(.secondary)) {
-                Toggle("Run updates on wake from sleep", isOn: $prefs.runOnWake)
-                Toggle("Run updates on a schedule", isOn: $prefs.scheduleEnabled)
+        }
+        .formStyle(.grouped)
+    }
+}
+
+struct AutomationPrefsTab: View {
+    @ObservedObject var prefs = Prefs.shared
+
+    var body: some View {
+        Form {
+            Section(footer: Text("Automatically run updates when your Mac wakes from sleep.").foregroundStyle(.secondary)) {
+                Toggle("Run on wake", isOn: $prefs.runOnWake)
+            }
+            Section(footer: Text("Takes effect on next app launch.").foregroundStyle(.secondary)) {
+                Toggle("Scheduled updates", isOn: $prefs.scheduleEnabled)
                 if prefs.scheduleEnabled {
                     Picker("Interval", selection: $prefs.scheduleHours) {
                         Text("Every 6 hours").tag(6)
@@ -220,22 +246,30 @@ struct PrefsView: View {
                     .pickerStyle(.segmented)
                 }
             }
-            Section(header: Text("Pre-update Script"),
+        }
+        .formStyle(.grouped)
+    }
+}
+
+struct ScriptsPrefsTab: View {
+    @ObservedObject var prefs = Prefs.shared
+
+    var body: some View {
+        Form {
+            Section(header: Text("Pre-update"),
                     footer: Text("Runs before brew update. Leave empty to skip.").foregroundStyle(.secondary)) {
                 TextEditor(text: $prefs.preScript)
                     .font(.system(size: 12, design: .monospaced))
-                    .frame(minHeight: 70)
+                    .frame(minHeight: 100)
             }
-            Section(header: Text("Post-update Script"),
+            Section(header: Text("Post-update"),
                     footer: Text("Runs after all steps complete. Leave empty to skip.").foregroundStyle(.secondary)) {
                 TextEditor(text: $prefs.postScript)
                     .font(.system(size: 12, design: .monospaced))
-                    .frame(minHeight: 70)
+                    .frame(minHeight: 100)
             }
         }
         .formStyle(.grouped)
-        .frame(width: 480)
-        .padding(.bottom)
     }
 }
 
