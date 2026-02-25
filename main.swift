@@ -524,6 +524,11 @@ class Updater: ObservableObject {
         let text: String
         let isError: Bool
         let isPrompt: Bool
+        let isSuggestion: Bool
+
+        init(text: String, isError: Bool = false, isPrompt: Bool = false, isSuggestion: Bool = false) {
+            self.text = text; self.isError = isError; self.isPrompt = isPrompt; self.isSuggestion = isSuggestion
+        }
     }
 
     func appendOutput(_ text: String, isError: Bool = false, isPrompt: Bool = false) {
@@ -532,6 +537,12 @@ class Updater: ObservableObject {
             for line in lines {
                 self.output.append(OutputLine(text: line, isError: isError, isPrompt: isPrompt))
             }
+        }
+    }
+
+    func appendSuggestion(_ text: String) {
+        DispatchQueue.main.async {
+            self.output.append(OutputLine(text: text, isSuggestion: true))
         }
     }
 
@@ -707,6 +718,9 @@ class Updater: ObservableObject {
             }
 
             self.log("--- Buum run finished (success: \(!failed)) ---\n")
+
+            // Generate fix suggestions for any remaining errors
+            if failed { self.generateSuggestions() }
 
             DispatchQueue.main.async {
                 self.isRunning = false
@@ -1211,6 +1225,64 @@ class Updater: ObservableObject {
             }
     }
 
+    private func generateSuggestions() {
+        let errors = output.filter { $0.isError }
+        var suggestions: [String] = []
+        var seen = Set<String>()
+
+        for line in errors {
+            let t = line.text
+
+            // Broken app source (renamed cask)
+            if t.contains("It seems the App source") || t.contains("is not there") {
+                let cask = t.hasPrefix("Error: ") ? String(t.dropFirst(7)).components(separatedBy: ":").first ?? "" : ""
+                let cmd = "brew reinstall --cask --force \(cask.trimmingCharacters(in: .whitespaces))"
+                if !cask.isEmpty && seen.insert(cmd).inserted { suggestions.append(cmd) }
+            }
+
+            // Permission denied / sudo terminal
+            if t.contains("a terminal is required") || t.contains("Permission denied") {
+                let cmd = "sudo brew upgrade"
+                if seen.insert(cmd).inserted {
+                    suggestions.append("# Run manually in Terminal with sudo:")
+                    suggestions.append(cmd)
+                }
+            }
+
+            // Version not installed (skipped)
+            if t.contains("Warning: Skipping") && t.contains("not installed") {
+                let parts = t.components(separatedBy: "Skipping ")
+                if let pkg = parts.last?.components(separatedBy: ":").first?.trimmingCharacters(in: .whitespaces) {
+                    let cmd = "brew reinstall \(pkg)"
+                    if seen.insert(cmd).inserted { suggestions.append(cmd) }
+                }
+            }
+
+            // Missing dependencies
+            if t.contains("missing dependencies") {
+                let cmd = "brew missing && brew reinstall $(brew missing | awk -F: '{print $1}')"
+                if seen.insert(cmd).inserted { suggestions.append(cmd) }
+            }
+
+            // Outdated Xcode CLT
+            if t.contains("CLT") || t.contains("command line tools") {
+                let cmd = "xcode-select --install"
+                if seen.insert(cmd).inserted { suggestions.append(cmd) }
+            }
+
+            // Generic brew doctor suggestion
+            if t.contains("Error:") && seen.insert("brew doctor").inserted {
+                suggestions.append("brew doctor")
+            }
+        }
+
+        if !suggestions.isEmpty {
+            appendOutput("")
+            appendOutput("💡 Suggested fixes (tap to copy):")
+            for s in suggestions { appendSuggestion(s) }
+        }
+    }
+
     func notify(success: Bool, brokenCasks: [String] = []) {
         // Skip notification on success if the user opted out
         if success && brokenCasks.isEmpty && !Prefs.shared.notifyOnSuccess { return }
@@ -1287,11 +1359,34 @@ struct TerminalView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(displayedLines) { line in
-                            Text(line.text)
-                                .font(.system(size: 12, design: .monospaced))
-                                .foregroundStyle(line.isError ? Color.red.opacity(0.85) : Color.green.opacity(0.9))
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            if line.isSuggestion {
+                                HStack(spacing: 6) {
+                                    Text(line.text)
+                                        .font(.system(size: 12, design: .monospaced))
+                                        .foregroundStyle(Color.cyan)
+                                        .textSelection(.enabled)
+                                    Button {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(line.text, forType: .string)
+                                    } label: {
+                                        Image(systemName: "doc.on.doc")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.cyan.opacity(0.7))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Copy to clipboard")
+                                }
+                                .padding(.vertical, 2)
+                                .padding(.horizontal, 8)
+                                .background(Color.cyan.opacity(0.08))
+                                .cornerRadius(4)
+                            } else {
+                                Text(line.text)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(line.isError ? Color.red.opacity(0.85) : Color.green.opacity(0.9))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
                         }
                         Color.clear.frame(height: 1).id("bottom")
                     }
