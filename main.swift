@@ -1040,9 +1040,10 @@ class Updater: ObservableObject {
         errPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            // "User canceled" means they dismissed the dialog — not a real error
             let cancelled = text.contains("User canceled") || text.contains("-128")
-            self.appendOutput(text, isError: !cancelled)
+            if !cancelled {
+                self.appendOutput(text, isError: true)
+            }
             self.log("stderr: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
         }
 
@@ -1054,8 +1055,10 @@ class Updater: ObservableObject {
 
         let exitCode = task.terminationStatus
         log("exit: \(exitCode)")
-        // Exit 1 with "User canceled" (-128) is not a real failure
-        if exitCode != 0 { failed = true }
+        // User cancel (-128) is not a real failure
+        if exitCode != 0 && !output.suffix(5).contains(where: { $0.text.contains("-128") || $0.text.contains("User canceled") }) {
+            failed = true
+        }
     }
 
     func isConnected() -> Bool {
