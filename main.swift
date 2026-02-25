@@ -584,22 +584,16 @@ class Updater: ObservableObject {
             var upgradeArgs = ["upgrade"]
             if Prefs.shared.greedyUpgrade { upgradeArgs.append("--greedy") }
             if Prefs.shared.dryRun        { upgradeArgs.append("--dry-run") }
+            let upgradeStart = self.output.count
             self.shell(brewPath, upgradeArgs, env: env, &failed)
             self.waitIfPromptActive()
 
-            // Force-upgrade any packages brew skipped
-            let skipped = self.output
-                .filter { $0.text.contains("Warning: Skipping") && $0.text.contains("not installed") }
-                .compactMap { line -> String? in
-                    // "Warning: Skipping ada-url: most recent version 3.4.3 not installed"
-                    let parts = line.text.components(separatedBy: "Skipping ")
-                    guard parts.count >= 2 else { return nil }
-                    return parts[1].components(separatedBy: ":").first?.trimmingCharacters(in: .whitespaces)
-                }
-            if !skipped.isEmpty && !Prefs.shared.dryRun {
-                self.setStatus("Force-upgrading \(skipped.count) skipped package(s)...")
-                self.appendOutput("🔁 Force-upgrading skipped: \(skipped.joined(separator: ", "))")
-                self.shell(brewPath, ["upgrade", "--force"] + skipped, env: env, &failed)
+            // Force-upgrade any packages brew skipped during upgrade
+            let upgradeSkipped = self.skippedPackages(since: upgradeStart)
+            if !upgradeSkipped.isEmpty && !Prefs.shared.dryRun {
+                self.setStatus("Force-upgrading \(upgradeSkipped.count) skipped package(s)...")
+                self.appendOutput("🔁 Force-upgrading skipped: \(upgradeSkipped.joined(separator: ", "))")
+                self.shell(brewPath, ["upgrade", "--force"] + upgradeSkipped, env: env, &failed)
                 self.waitIfPromptActive()
             }
 
@@ -616,8 +610,21 @@ class Updater: ObservableObject {
             self.setStatus("Cleaning up Homebrew cache...")
             if Prefs.shared.runCleanup {
                 let beforeCleanup = self.diskFreeBytes()
+                let cleanupStart = self.output.count
                 self.shell(brewPath, ["cleanup", "--prune=all"], env: env, &failed)
                 self.waitIfPromptActive()
+
+                // Force-upgrade any packages cleanup warned about, then re-clean
+                let cleanupSkipped = self.skippedPackages(since: cleanupStart)
+                if !cleanupSkipped.isEmpty && !Prefs.shared.dryRun {
+                    self.setStatus("Force-upgrading \(cleanupSkipped.count) package(s) skipped in cleanup...")
+                    self.appendOutput("🔁 Force-upgrading: \(cleanupSkipped.joined(separator: ", "))")
+                    self.shell(brewPath, ["upgrade", "--force"] + cleanupSkipped, env: env, &failed)
+                    self.waitIfPromptActive()
+                    self.shell(brewPath, ["cleanup", "--prune=all"], env: env, &failed)
+                    self.waitIfPromptActive()
+                }
+
                 let freed = self.diskFreeBytes() - beforeCleanup
                 if freed > 0 {
                     let mb = freed / 1_000_000
@@ -1099,6 +1106,17 @@ class Updater: ObservableObject {
         scheduleTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.run()
         }
+    }
+
+    // Parses output lines since `startIndex` for "Warning: Skipping X: most recent version Y not installed"
+    private func skippedPackages(since startIndex: Int) -> [String] {
+        output.dropFirst(startIndex)
+            .filter { $0.text.contains("Warning: Skipping") && $0.text.contains("not installed") }
+            .compactMap { line -> String? in
+                let parts = line.text.components(separatedBy: "Skipping ")
+                guard parts.count >= 2 else { return nil }
+                return parts[1].components(separatedBy: ":").first?.trimmingCharacters(in: .whitespaces)
+            }
     }
 
     func notify(success: Bool, brokenCasks: [String] = []) {
