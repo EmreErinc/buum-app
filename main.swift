@@ -461,7 +461,7 @@ class Updater: ObservableObject {
             var failed = false
             self.setStatus("Running macOS Software Update…")
             self.log("--- softwareupdate started ---")
-            self.shell("/usr/sbin/softwareupdate", ["--install", "--all"], env: env, &failed)
+            self.shellWithAuth("/usr/sbin/softwareupdate --install --all", label: "softwareupdate --install --all", env: env, failed: &failed)
             self.log("--- softwareupdate finished ---\n")
             DispatchQueue.main.async {
                 self.isRunning = false
@@ -637,7 +637,17 @@ class Updater: ObservableObject {
                 self.waitIfPromptActive()
 
                 self.setStatus("Upgrading App Store apps...")
+                // Try without auth first; mas usually doesn't need sudo
+                let masStart = self.output.count
                 self.shell(masPath, ["upgrade"], env: env, &failed)
+                self.waitIfPromptActive()
+                // If mas failed asking for sudo, retry with macOS auth dialog
+                let masNeededSudo = self.output.dropFirst(masStart).contains { $0.text.contains("sudo") || $0.text.contains("a terminal is required") }
+                if masNeededSudo {
+                    failed = false
+                    self.appendOutput("🔑 Retrying mas upgrade with admin privileges…")
+                    self.shellWithAuth("\(masPath) upgrade", label: "mas upgrade (admin)", env: env, failed: &failed)
+                }
                 self.waitIfPromptActive()
             }
 
