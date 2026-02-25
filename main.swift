@@ -148,6 +148,12 @@ struct MenuContent: View {
             openWindow(id: "output")
         }
         .disabled(updater.output.isEmpty)
+        Button("Rerun Updates") {
+            updater.run()
+            openWindow(id: "output")
+        }
+        .disabled(updater.isRunning)
+        .keyboardShortcut("r")
         Button("Show Log") {
             NSWorkspace.shared.open(updater.logURL)
         }
@@ -1422,6 +1428,11 @@ struct TerminalView: View {
                 .font(.system(size: 11))
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
+                Button("Rerun") { updater.run() }
+                    .font(.system(size: 11))
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.orange)
+                    .disabled(updater.isRunning)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
