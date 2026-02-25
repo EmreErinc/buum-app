@@ -566,9 +566,14 @@ class Updater: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async {
             let brewPath = "/opt/homebrew/bin/brew"
             let masPath = "/opt/homebrew/bin/mas"
+
+            // Create askpass helper so sudo shows native macOS password dialog
+            let askpassPath = self.setupAskpass()
+
             let env: [String: String] = {
                 var e = ProcessInfo.processInfo.environment
                 e["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                e["SUDO_ASKPASS"] = askpassPath
                 return e
             }()
 
@@ -619,7 +624,7 @@ class Updater: ObservableObject {
             if Prefs.shared.greedyUpgrade { upgradeArgs.append("--greedy") }
             if Prefs.shared.dryRun        { upgradeArgs.append("--dry-run") }
             let upgradeStart = self.output.count
-            self.shellOrAuth(brewPath, upgradeArgs, env: env, &failed)
+            self.shell(brewPath, upgradeArgs, env: env, &failed)
             self.waitIfPromptActive()
 
             // Force-upgrade any packages brew skipped during upgrade
@@ -627,7 +632,7 @@ class Updater: ObservableObject {
             if !upgradeSkipped.isEmpty && !Prefs.shared.dryRun {
                 self.setStatus("Reinstalling \(upgradeSkipped.count) skipped package(s)...")
                 self.appendOutput("🔁 Reinstalling skipped: \(upgradeSkipped.joined(separator: ", "))")
-                self.shellOrAuth(brewPath, ["reinstall"] + upgradeSkipped, env: env, &failed)
+                self.shell(brewPath, ["reinstall"] + upgradeSkipped, env: env, &failed)
                 self.waitIfPromptActive()
             }
 
@@ -654,7 +659,7 @@ class Updater: ObservableObject {
                 if !cleanupSkipped.isEmpty && !Prefs.shared.dryRun {
                     self.setStatus("Reinstalling \(cleanupSkipped.count) package(s) skipped in cleanup...")
                     self.appendOutput("🔁 Reinstalling: \(cleanupSkipped.joined(separator: ", "))")
-                    self.shellOrAuth(brewPath, ["reinstall"] + cleanupSkipped, env: env, &failed)
+                    self.shell(brewPath, ["reinstall"] + cleanupSkipped, env: env, &failed)
                     self.waitIfPromptActive()
                     self.shell(brewPath, ["cleanup", "--prune=all"], env: env, &failed)
                     self.waitIfPromptActive()
@@ -1059,6 +1064,20 @@ class Updater: ObservableObject {
         if exitCode != 0 && !output.suffix(5).contains(where: { $0.text.contains("-128") || $0.text.contains("User canceled") }) {
             failed = true
         }
+    }
+
+    // Creates a SUDO_ASKPASS script that shows macOS native password dialog
+    private func setupAskpass() -> String {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("Buum")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let askpassPath = dir.appendingPathComponent("askpass.sh").path
+        let script = """
+        #!/bin/bash
+        /usr/bin/osascript -e 'display dialog "Buum needs your password to continue." default answer "" with hidden answer with title "Buum" buttons {"Cancel","OK"} default button "OK"' -e 'text returned of result' 2>/dev/null
+        """
+        try? script.write(toFile: askpassPath, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: askpassPath)
+        return askpassPath
     }
 
     func isConnected() -> Bool {
