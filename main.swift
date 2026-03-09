@@ -698,8 +698,11 @@ class Updater: ObservableObject {
     func appendOutput(_ text: String, isError: Bool = false, isPrompt: Bool = false) {
         let lines = text.components(separatedBy: "\n").filter { !$0.isEmpty }
         DispatchQueue.main.async {
-            for line in lines {
-                self.output.append(OutputLine(text: line, isError: isError, isPrompt: isPrompt))
+            for rawLine in lines {
+                let line = rawLine.components(separatedBy: "\r").last ?? rawLine
+                if !line.trimmingCharacters(in: .whitespaces).isEmpty {
+                    self.output.append(OutputLine(text: line, isError: isError, isPrompt: isPrompt))
+                }
             }
         }
     }
@@ -828,7 +831,7 @@ class Updater: ObservableObject {
                 self.waitIfPromptActive()
 
                 self.setStatus("Upgrading App Store apps...")
-                self.shellOrAuth(masPath, ["upgrade"], env: env, &failed)
+                self.shell("/usr/bin/script", ["-q", "/dev/null", masPath, "upgrade"], env: env, &failed)
                 self.waitIfPromptActive()
                 self.waitIfPromptActive()
             }
@@ -1146,6 +1149,9 @@ class Updater: ObservableObject {
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
             self.log("stdout: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
             self.appendOutput(text, isError: false)
+            if text.lowercased().contains("password:") {
+                self.promptForInput("Password:")
+            }
         }
 
         // Stream stderr live
@@ -1154,6 +1160,9 @@ class Updater: ObservableObject {
             guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
             self.log("stderr: \(text.trimmingCharacters(in: .whitespacesAndNewlines))")
             self.appendOutput(text, isError: true)
+            if text.lowercased().contains("password:") {
+                self.promptForInput("Password:")
+            }
         }
 
         task.launch()
